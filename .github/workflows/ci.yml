@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff pytest
+      - run: ruff check anki-addon
+      - run: python -m pytest anki-addon/tests -v
+      - run: anki-addon/scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toolforest_bridge.ankiaddon
+          path: dist/toolforest_bridge.ankiaddon
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: anki-addon/scripts/package.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/toolforest_bridge.ankiaddon
