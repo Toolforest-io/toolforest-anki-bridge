@@ -18,12 +18,11 @@ if _IN_ANKI:
 
     def _on_profile_open() -> None:
         ui.setup_menu()
-        # M2: start the bridge connection thread if a token is configured.
+        ui.start_if_configured()
 
     def _on_profile_close() -> None:
-        # M2: clean shutdown of the bridge connection thread.
-        pass
+        ui.shutdown()
 
     gui_hooks.profile_did_open.append(_on_profile_open)
     gui_hooks.profile_will_close.append(_on_profile_close)
-    mw.addonManager.setConfigAction(__name__, lambda: ui.show_dialog())
+    mw.addonManager.setConfigAction(__name__, ui.show_dialog)

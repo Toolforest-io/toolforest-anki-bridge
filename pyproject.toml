@@ -5,3 +5,4 @@ extend-exclude = ["anki-addon/src/toolforest_bridge/vendor"]
 
 [tool.pytest.ini_options]
 testpaths = ["anki-addon/tests"]
+addopts = "-p no:cacheprovider"
