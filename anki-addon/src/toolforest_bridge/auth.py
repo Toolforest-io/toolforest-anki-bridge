@@ -22,11 +22,20 @@ class DeviceFlowError(Exception):
     pass
 
 
-def _post(api_base: str, path: str, body: dict, timeout: float = 15.0) -> dict:
+def _post(
+    api_base: str,
+    path: str,
+    body: dict,
+    timeout: float = 15.0,
+    headers: dict | None = None,
+) -> dict:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = urllib.request.Request(
         f"{api_base}{path}",
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     try:
@@ -46,6 +55,20 @@ def start_device_flow(api_base: str, device_name: str) -> dict:
     result = _post(api_base, "/device/code", {"device_name": device_name})
     if "device_code" not in result:
         raise DeviceFlowError(result.get("error", "device code request failed"))
+    return result
+
+
+def revoke_self(api_base: str, token: str) -> dict:
+    """Revoke this add-on's current bridge token."""
+    result = _post(
+        api_base,
+        "/device/revoke-self",
+        {},
+        timeout=10.0,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    if result.get("revoked") is not True:
+        raise DeviceFlowError(result.get("error", "revoke request failed"))
     return result
 
 

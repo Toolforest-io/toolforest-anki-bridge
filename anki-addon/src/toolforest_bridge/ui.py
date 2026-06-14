@@ -239,11 +239,26 @@ def _close_sign_in_dialog() -> None:
 
 def _disconnect() -> None:
     global _connection
+    config = _config()
+    token = config.get("bridge_token")
+    api_base = auth.api_base_from_ws(_ws_endpoint(config))
     if _connection:
         _connection.stop()
         _connection = None
     _clear_stored_token()
     _set_status(bridge.STATUS_SIGNED_OUT)
+    if token:
+        mw.taskman.run_in_background(
+            lambda: auth.revoke_self(api_base, token),
+            _ignore_background_error,
+        )
+
+
+def _ignore_background_error(future) -> None:
+    try:
+        future.result()
+    except Exception:
+        pass
 
 
 def _clear_stored_token() -> None:
