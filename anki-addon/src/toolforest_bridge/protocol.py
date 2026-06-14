@@ -38,6 +38,7 @@ TYPE_REQUEST = "request"
 TYPE_RESPONSE = "response"
 TYPE_RESPONSE_PART = "response_part"
 TYPE_DISPLACED = "displaced"
+TYPE_REVOKED = "revoked"
 TYPE_PING = "ping"
 
 # Error codes reported in response envelopes
