@@ -81,6 +81,7 @@ def _connect(token: str, config: dict) -> None:
         token=token,
         ankiconnect_key=config.get("ankiconnect_key"),
         on_status=_set_status,
+        on_auth_invalid=_clear_stored_token,
     )
     _connection.start()
 
@@ -148,6 +149,17 @@ def _sign_in() -> None:
         _connect(result["access_token"], config)
 
     mw.taskman.run_in_background(task, on_done)
+
+
+def _clear_stored_token() -> None:
+    """Called from the bridge thread when the gateway rejects/revokes the token."""
+    def apply() -> None:
+        config = _config()
+        if "bridge_token" in config:
+            config.pop("bridge_token", None)
+            mw.addonManager.writeConfig(ADDON, config)
+
+    mw.taskman.run_on_main(apply)
 
 
 def _device_name() -> str:

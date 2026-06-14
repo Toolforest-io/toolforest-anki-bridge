@@ -37,12 +37,14 @@ class BridgeConnection:
         ankiconnect_key: Optional[str] = None,
         agent_version: str = "0.1.0",
         on_status: Optional[Callable[[str], None]] = None,
+        on_auth_invalid: Optional[Callable[[], None]] = None,
     ) -> None:
         self._ws_endpoint = ws_endpoint
         self._token = token
         self._ankiconnect_key = ankiconnect_key
         self._agent_version = agent_version
         self._on_status = on_status or (lambda status: None)
+        self._on_auth_invalid = on_auth_invalid or (lambda: None)
 
         self._thread: Optional[threading.Thread] = None
         self._app: Optional[websocket.WebSocketApp] = None
@@ -130,13 +132,25 @@ class BridgeConnection:
                 app.close()
             except Exception:
                 pass
+        elif message_type == protocol.TYPE_REVOKED:
+            self._auth_invalid()
+            try:
+                app.close()
+            except Exception:
+                pass
 
     def _on_close(self, _app, status_code, _msg) -> None:
         # 4401 is our gateway's "token revoked/unauthorized" close code.
         if status_code in (4401, 1008):
-            self._stop.set()
+            self._auth_invalid()
 
-    def _on_error(self, _app, _error) -> None:
+    def _on_error(self, _app, error) -> None:
+        if isinstance(error, websocket.WebSocketBadStatusException) and error.status_code == 401:
+            self._auth_invalid()
         # run_forever returns after this; the _run loop decides whether to
         # reconnect based on the stop/displaced flags.
         pass
+
+    def _auth_invalid(self) -> None:
+        self._stop.set()
+        self._on_auth_invalid()
