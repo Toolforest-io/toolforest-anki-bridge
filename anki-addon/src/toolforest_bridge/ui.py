@@ -10,8 +10,21 @@ from __future__ import annotations
 from typing import Optional
 
 from aqt import mw
-from aqt.qt import QAction
-from aqt.utils import showInfo, showWarning
+from aqt.qt import (
+    QAction,
+    QApplication,
+    QDesktopServices,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    Qt,
+    QUrl,
+    QVBoxLayout,
+)
+from aqt.utils import showWarning
 
 from . import auth, bridge, protocol
 
@@ -19,6 +32,7 @@ ADDON = __name__.split(".")[0]
 
 _action: Optional[QAction] = None
 _connection: Optional[bridge.BridgeConnection] = None
+_sign_in_dialog: Optional[QDialog] = None
 _status: str = bridge.STATUS_SIGNED_OUT
 
 _STATUS_LABEL = {
@@ -88,12 +102,7 @@ def _connect(token: str, config: dict) -> None:
 
 def show_dialog() -> None:
     if _status in (bridge.STATUS_CONNECTED, bridge.STATUS_CONNECTING, bridge.STATUS_RECONNECTING):
-        showInfo(
-            "Toolforest Bridge is connected.\n\n"
-            "Your Anki collection is reachable from Toolforest while Anki is open. "
-            "Use your AI assistant to create and review cards.",
-            title="Toolforest Bridge",
-        )
+        _show_connected_dialog()
         return
     if _status == bridge.STATUS_DISPLACED:
         if _ask("This account is connected through Anki on another device. Connect here instead?"):
@@ -120,15 +129,7 @@ def _sign_in() -> None:
     def task() -> dict:
         start = auth.start_device_flow(api_base, device_name=_device_name())
         # Show the code to the user on the main thread.
-        mw.taskman.run_on_main(
-            lambda: showInfo(
-                f"To connect Anki to Toolforest:\n\n"
-                f"1. Open {start['verification_uri']}\n"
-                f"2. Enter this code:  {start['user_code']}\n\n"
-                f"Leave Anki open — it will connect automatically once approved.",
-                title="Toolforest Bridge — sign in",
-            )
-        )
+        mw.taskman.run_on_main(lambda: _show_sign_in_instructions(start))
         return auth.poll_for_token(
             api_base,
             start["device_code"],
@@ -145,18 +146,118 @@ def _sign_in() -> None:
             return
         config = _config()
         config["bridge_token"] = result["access_token"]
+        config["bridge_device_id"] = result.get("device_id")
         mw.addonManager.writeConfig(ADDON, config)
+        _close_sign_in_dialog()
         _connect(result["access_token"], config)
 
     mw.taskman.run_in_background(task, on_done)
+
+
+def _show_sign_in_instructions(start: dict) -> None:
+    global _sign_in_dialog
+    uri = start["verification_uri"]
+    code = start["user_code"]
+
+    if _sign_in_dialog:
+        _sign_in_dialog.close()
+
+    dialog = QDialog(mw)
+    _sign_in_dialog = dialog
+    dialog.setWindowTitle("Toolforest Bridge — sign in")
+    dialog.setMinimumWidth(420)
+
+    layout = QVBoxLayout(dialog)
+
+    instructions = QLabel(
+        "To connect Anki to Toolforest:<br><br>"
+        f"1. Open <a href=\"{uri}\">{uri}</a><br>"
+        "2. Enter this code:"
+    )
+    instructions.setTextFormat(Qt.TextFormat.RichText)
+    instructions.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+    instructions.setOpenExternalLinks(False)
+    instructions.setWordWrap(True)
+    instructions.linkActivated.connect(lambda _url: QDesktopServices.openUrl(QUrl(uri)))
+    layout.addWidget(instructions)
+
+    code_field = QLineEdit(code)
+    code_field.setReadOnly(True)
+    code_field.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(code_field)
+
+    note = QLabel("Leave Anki open — it will connect automatically once approved.")
+    note.setWordWrap(True)
+    layout.addWidget(note)
+
+    buttons = QHBoxLayout()
+    open_button = QPushButton("Open activation page")
+    copy_button = QPushButton("Copy code")
+    close_button = QPushButton("Close")
+    buttons.addWidget(open_button)
+    buttons.addWidget(copy_button)
+    buttons.addStretch(1)
+    buttons.addWidget(close_button)
+    layout.addLayout(buttons)
+
+    open_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(uri)))
+    copy_button.clicked.connect(lambda: QApplication.clipboard().setText(code))
+    close_button.clicked.connect(dialog.close)
+    dialog.finished.connect(lambda _result: _clear_sign_in_dialog(dialog))
+
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+
+
+def _show_connected_dialog() -> None:
+    message = QMessageBox(mw)
+    message.setWindowTitle("Toolforest Bridge")
+    message.setIcon(QMessageBox.Icon.Information)
+    message.setText(
+        "Toolforest Bridge is connected.\n\n"
+        "Your Anki collection is reachable from Toolforest while Anki is open. "
+        "Use your AI assistant to create and review cards."
+    )
+    message.setStandardButtons(QMessageBox.StandardButton.Ok)
+    disconnect_button = message.addButton("Disconnect", QMessageBox.ButtonRole.DestructiveRole)
+    message.exec()
+    if message.clickedButton() == disconnect_button:
+        _disconnect()
+
+
+def _clear_sign_in_dialog(dialog: QDialog) -> None:
+    global _sign_in_dialog
+    if _sign_in_dialog is dialog:
+        _sign_in_dialog = None
+
+
+def _close_sign_in_dialog() -> None:
+    if _sign_in_dialog:
+        _sign_in_dialog.close()
+
+
+def _disconnect() -> None:
+    global _connection
+    if _connection:
+        _connection.stop()
+        _connection = None
+    _clear_stored_token()
+    _set_status(bridge.STATUS_SIGNED_OUT)
 
 
 def _clear_stored_token() -> None:
     """Called from the bridge thread when the gateway rejects/revokes the token."""
     def apply() -> None:
         config = _config()
+        changed = False
         if "bridge_token" in config:
             config.pop("bridge_token", None)
+            changed = True
+        if "bridge_device_id" in config:
+            config.pop("bridge_device_id", None)
+            changed = True
+        if changed:
             mw.addonManager.writeConfig(ADDON, config)
 
     mw.taskman.run_on_main(apply)
@@ -178,8 +279,6 @@ def _ankiconnect_available() -> bool:
 
 
 def _ask(text: str) -> bool:
-    from aqt.qt import QMessageBox
-
     return (
         QMessageBox.question(mw, "Toolforest Bridge", text)
         == QMessageBox.StandardButton.Yes
