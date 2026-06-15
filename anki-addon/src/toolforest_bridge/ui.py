@@ -37,10 +37,10 @@ _status: str = bridge.STATUS_SIGNED_OUT
 
 _STATUS_LABEL = {
     bridge.STATUS_CONNECTING: "Toolforest Bridge: connecting…",
-    bridge.STATUS_CONNECTED: "Toolforest Bridge: connected ✓",
+    bridge.STATUS_CONNECTED: "Toolforest Bridge: disconnect",
     bridge.STATUS_RECONNECTING: "Toolforest Bridge: reconnecting…",
-    bridge.STATUS_SIGNED_OUT: "Toolforest Bridge: sign in…",
-    bridge.STATUS_DISPLACED: "Toolforest Bridge: connected on another device",
+    bridge.STATUS_SIGNED_OUT: "Toolforest Bridge: connect",
+    bridge.STATUS_DISPLACED: "Toolforest Bridge: connect",
 }
 
 
