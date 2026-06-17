@@ -1,4 +1,5 @@
 import json
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -29,15 +30,28 @@ class _StubAnkiConnect(BaseHTTPRequestHandler):
         pass
 
 
-def _run_stub_on_8765():
-    server = HTTPServer(("127.0.0.1", 8765), _StubAnkiConnect)
+def _run_stub():
+    server = HTTPServer(("127.0.0.1", 0), _StubAnkiConnect)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
 
 
-def test_forwards_to_ankiconnect_and_wraps_response():
-    server = _run_stub_on_8765()
+def _set_ankiconnect_url(monkeypatch, server):
+    monkeypatch.setattr(protocol, "ANKICONNECT_URL", f"http://127.0.0.1:{server.server_port}")
+
+
+def _unused_ankiconnect_url():
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+    return f"http://{host}:{port}"
+
+
+def test_forwards_to_ankiconnect_and_wraps_response(monkeypatch):
+    server = _run_stub()
+    _set_ankiconnect_url(monkeypatch, server)
     try:
         message = {
             "type": "request",
@@ -55,8 +69,9 @@ def test_forwards_to_ankiconnect_and_wraps_response():
         server.shutdown()
 
 
-def test_target_unavailable_when_ankiconnect_down():
-    # nothing listening on 8765
+def test_target_unavailable_when_ankiconnect_down(monkeypatch):
+    # Nothing is listening on this reserved test port.
+    monkeypatch.setattr(protocol, "ANKICONNECT_URL", _unused_ankiconnect_url())
     message = {
         "type": "request",
         "correlation_id": "c2",
@@ -69,7 +84,7 @@ def test_target_unavailable_when_ankiconnect_down():
     assert envelope["error"] == protocol.ERROR_TARGET_UNAVAILABLE
 
 
-def test_injects_ankiconnect_key_when_configured():
+def test_injects_ankiconnect_key_when_configured(monkeypatch):
     captured = {}
 
     class _KeyChecker(_StubAnkiConnect):
@@ -82,7 +97,8 @@ def test_injects_ankiconnect_key_when_configured():
             self.end_headers()
             self.wfile.write(payload)
 
-    server = HTTPServer(("127.0.0.1", 8765), _KeyChecker)
+    server = HTTPServer(("127.0.0.1", 0), _KeyChecker)
+    _set_ankiconnect_url(monkeypatch, server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         message = {
@@ -95,3 +111,45 @@ def test_injects_ankiconnect_key_when_configured():
         assert captured["key"] == "secret-key"
     finally:
         server.shutdown()
+
+
+def test_bridge_native_action_does_not_call_ankiconnect(monkeypatch):
+    captured = {}
+
+    def fake_handle(body):
+        captured.update(body)
+        return {"result": {"deleted": True}, "error": None}
+
+    monkeypatch.setattr(forwarder.native_actions, "handle", fake_handle)
+    message = {
+        "type": "request",
+        "correlation_id": "c4",
+        "body": {"action": "toolforestDeleteModel", "params": {"modelName": "Scratch"}},
+        "timeout_ms": 2000,
+    }
+
+    replies = list(forwarder.handle_request(message))
+
+    envelope = json.loads(replies[0])
+    assert captured["action"] == "toolforestDeleteModel"
+    assert envelope["status"] == 200
+    assert envelope["body"] == {"result": {"deleted": True}, "error": None}
+
+
+def test_bridge_native_action_returns_ankiconnect_style_error(monkeypatch):
+    def fake_handle(_body):
+        raise ValueError("model is still in use")
+
+    monkeypatch.setattr(forwarder.native_actions, "handle", fake_handle)
+    message = {
+        "type": "request",
+        "correlation_id": "c5",
+        "body": {"action": "toolforestDeleteModel", "params": {"modelName": "Basic"}},
+        "timeout_ms": 2000,
+    }
+
+    replies = list(forwarder.handle_request(message))
+
+    envelope = json.loads(replies[0])
+    assert envelope["status"] == 200
+    assert envelope["body"] == {"result": None, "error": "model is still in use"}
