@@ -106,7 +106,7 @@ def _delete_model_in_anki(params: dict, timeout_s: float) -> dict:
 
     mw.taskman.run_on_main(start_op)
     if not done.wait(timeout_s):
-        raise TimeoutError("timed out deleting model")
+        raise TimeoutError("timed out waiting for model deletion; it may still complete in Anki")
     if "error" in outcome:
         raise outcome["error"]
     return outcome["result"]

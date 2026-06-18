@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -108,3 +109,20 @@ def test_handle_dispatches_delete_model(monkeypatch):
 
     assert out == {"result": {"model": "Scratch", "model_id": 1, "deleted": True}, "error": None}
     assert seen["timeout_s"] == 12.5
+
+
+def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
+    mw = SimpleNamespace(
+        taskman=SimpleNamespace(run_on_main=lambda _callback: None),
+    )
+    monkeypatch.setattr(
+        native_actions,
+        "_current_anki_context",
+        lambda: (object(), mw),
+    )
+
+    with pytest.raises(TimeoutError, match="may still complete"):
+        native_actions.delete_model(
+            {"modelName": "Scratch", "confirm": True},
+            timeout_s=0,
+        )
