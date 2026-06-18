@@ -179,11 +179,14 @@ def _show_sign_in_instructions(start: dict) -> None:
     global _sign_in_dialog
     uri = start["verification_uri"]
     code = start["user_code"]
+    uri_attr = html.escape(uri, quote=True)
+    uri_text = html.escape(uri)
 
     if _sign_in_dialog:
         _sign_in_dialog.close()
 
     dialog = QDialog(mw)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     _sign_in_dialog = dialog
     dialog.setWindowTitle("Toolforest Bridge — sign in")
     dialog.setMinimumWidth(420)
@@ -192,7 +195,7 @@ def _show_sign_in_instructions(start: dict) -> None:
 
     instructions = QLabel(
         "To connect Anki to Toolforest:<br><br>"
-        f"1. Open <a href=\"{uri}\">{uri}</a><br>"
+        f'1. Open <a href="{uri_attr}">{uri_text}</a><br>'
         "2. Enter this code:"
     )
     instructions.setTextFormat(Qt.TextFormat.RichText)
@@ -241,6 +244,7 @@ def _show_status_dialog() -> None:
         return
 
     dialog = QDialog(mw)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     _status_dialog = dialog
     dialog.setWindowTitle("Toolforest Bridge")
     dialog.setMinimumWidth(520)
