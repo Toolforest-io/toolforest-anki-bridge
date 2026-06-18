@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from typing import Iterator, Optional
 
-from . import protocol
+from . import native_actions, protocol
 
 _TIMEOUT_MARGIN_S = 1.0
 
@@ -20,9 +20,17 @@ def handle_request(message: dict, ankiconnect_key: Optional[str] = None) -> Iter
     """Handle a decoded `request` envelope; yield wire messages to send back."""
     correlation_id = message["correlation_id"]
     body = message.get("body") or {}
+    timeout_s = max(1.0, message.get("timeout_ms", 15000) / 1000 - _TIMEOUT_MARGIN_S)
+    if native_actions.can_handle(body):
+        try:
+            payload = native_actions.handle(body, timeout_s=timeout_s)
+        except Exception as exc:
+            payload = {"result": None, "error": str(exc)}
+        yield from protocol.response_messages(correlation_id, 200, payload)
+        return
+
     if ankiconnect_key and "key" not in body:
         body["key"] = ankiconnect_key
-    timeout_s = max(1.0, message.get("timeout_ms", 15000) / 1000 - _TIMEOUT_MARGIN_S)
 
     request = urllib.request.Request(
         protocol.ANKICONNECT_URL,
