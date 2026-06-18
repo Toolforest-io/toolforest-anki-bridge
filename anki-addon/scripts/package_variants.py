@@ -95,13 +95,29 @@ def build_variant(variant: Variant) -> Path:
     return out
 
 
+def preserve_config(target: Path) -> dict[str, str]:
+    preserved = {}
+    for filename in ("config.json", "meta.json"):
+        path = target / filename
+        if path.exists():
+            preserved[filename] = path.read_text()
+    return preserved
+
+
+def restore_config(target: Path, preserved: dict[str, str]) -> None:
+    for filename, text in preserved.items():
+        (target / filename).write_text(text)
+
+
 def install_variant(variant: Variant) -> None:
     target = ANKI_ADDONS_DIR / variant.package
+    preserved = preserve_config(target)
     if target.exists():
         shutil.rmtree(target)
     shutil.copytree(SOURCE_DIR, target)
     clean_staging(target)
     patch_variant(target, variant)
+    restore_config(target, preserved)
 
 
 def main() -> None:
