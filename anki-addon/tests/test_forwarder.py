@@ -116,8 +116,9 @@ def test_injects_ankiconnect_key_when_configured(monkeypatch):
 def test_bridge_native_action_does_not_call_ankiconnect(monkeypatch):
     captured = {}
 
-    def fake_handle(body):
-        captured.update(body)
+    def fake_handle(body, timeout_s):
+        captured["body"] = body
+        captured["timeout_s"] = timeout_s
         return {"result": {"deleted": True}, "error": None}
 
     monkeypatch.setattr(forwarder.native_actions, "handle", fake_handle)
@@ -131,13 +132,14 @@ def test_bridge_native_action_does_not_call_ankiconnect(monkeypatch):
     replies = list(forwarder.handle_request(message))
 
     envelope = json.loads(replies[0])
-    assert captured["action"] == "toolforestDeleteModel"
+    assert captured["body"]["action"] == "toolforestDeleteModel"
+    assert captured["timeout_s"] == 1.0
     assert envelope["status"] == 200
     assert envelope["body"] == {"result": {"deleted": True}, "error": None}
 
 
 def test_bridge_native_action_returns_ankiconnect_style_error(monkeypatch):
-    def fake_handle(_body):
+    def fake_handle(_body, timeout_s):
         raise ValueError("model is still in use")
 
     monkeypatch.setattr(forwarder.native_actions, "handle", fake_handle)
