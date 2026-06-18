@@ -89,14 +89,22 @@ def test_delete_model_requires_model_name():
 
 
 def test_handle_dispatches_delete_model(monkeypatch):
+    seen = {}
+
+    def fake_delete_model(params, timeout_s):
+        seen["timeout_s"] = timeout_s
+        return {"model": params["modelName"], "model_id": 1, "deleted": True}
+
     monkeypatch.setattr(
         native_actions,
         "delete_model",
-        lambda params: {"model": params["modelName"], "model_id": 1, "deleted": True},
+        fake_delete_model,
     )
 
     out = native_actions.handle(
-        {"action": native_actions.DELETE_MODEL_ACTION, "params": {"modelName": "Scratch"}}
+        {"action": native_actions.DELETE_MODEL_ACTION, "params": {"modelName": "Scratch"}},
+        timeout_s=12.5,
     )
 
     assert out == {"result": {"model": "Scratch", "model_id": 1, "deleted": True}, "error": None}
+    assert seen["timeout_s"] == 12.5

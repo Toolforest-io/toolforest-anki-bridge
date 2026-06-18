@@ -25,11 +25,11 @@ def can_handle(body: dict) -> bool:
     return body.get("action") == DELETE_MODEL_ACTION
 
 
-def handle(body: dict) -> dict:
+def handle(body: dict, timeout_s: float = _NATIVE_ACTION_TIMEOUT_S) -> dict:
     action = body.get("action")
     params = body.get("params") or {}
     if action == DELETE_MODEL_ACTION:
-        return {"result": delete_model(params), "error": None}
+        return {"result": delete_model(params, timeout_s=timeout_s), "error": None}
     return {"result": None, "error": f"unsupported bridge-native action: {action}"}
 
 
@@ -81,7 +81,7 @@ def _delete_model_from_collection(params: dict, collection: Any) -> _DeleteModel
     )
 
 
-def _delete_model_in_anki(params: dict) -> dict:
+def _delete_model_in_anki(params: dict, timeout_s: float) -> dict:
     _collection, mw = _current_anki_context()
     done = threading.Event()
     outcome: dict[str, Any] = {}
@@ -105,17 +105,22 @@ def _delete_model_in_anki(params: dict) -> dict:
             finish(error=exc)
 
     mw.taskman.run_on_main(start_op)
-    if not done.wait(_NATIVE_ACTION_TIMEOUT_S):
+    if not done.wait(timeout_s):
         raise TimeoutError("timed out deleting model")
     if "error" in outcome:
         raise outcome["error"]
     return outcome["result"]
 
 
-def delete_model(params: dict, collection: Optional[Any] = None, mw: Optional[Any] = None) -> dict:
+def delete_model(
+    params: dict,
+    collection: Optional[Any] = None,
+    mw: Optional[Any] = None,
+    timeout_s: float = _NATIVE_ACTION_TIMEOUT_S,
+) -> dict:
     if collection is not None:
         result = _delete_model_from_collection(params, collection)
         if mw is not None:
             mw.reset()
         return result.payload
-    return _delete_model_in_anki(params)
+    return _delete_model_in_anki(params, timeout_s)
