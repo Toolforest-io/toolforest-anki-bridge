@@ -1,6 +1,4 @@
 {
     "bridge_token": null,
-    "endpoint_override": null,
-    "ankiconnect_url": "http://127.0.0.1:8765",
-    "ankiconnect_key": null
+    "endpoint_override": null
 }

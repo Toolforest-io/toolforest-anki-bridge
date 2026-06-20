@@ -47,7 +47,7 @@ def test_request_message_forwards_and_replies(monkeypatch):
     conn = _conn()
     app = MagicMock()
 
-    def fake_handle_request(message, key):
+    def fake_handle_request(message):
         assert message["correlation_id"] == "c1"
         yield json.dumps({"type": "response", "correlation_id": "c1", "status": 200, "body": {}})
 

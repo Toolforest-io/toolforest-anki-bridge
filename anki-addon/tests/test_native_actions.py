@@ -30,8 +30,39 @@ class _Models:
 
 
 class _Collection:
-    def __init__(self, models):
+    def __init__(self, models, decks=None, sched=None):
         self.models = models
+        self.decks = decks
+        self.sched = sched
+        self.removed_notes = []
+
+    def remove_notes(self, note_ids):
+        self.removed_notes.extend(note_ids)
+        return object()
+
+
+class _Sched:
+    def __init__(self):
+        self.set_due_date_calls = []
+
+    def set_due_date(self, card_ids, days, config_key=None):
+        self.set_due_date_calls.append((card_ids, days, config_key))
+        return object()
+
+
+class _Decks:
+    def __init__(self):
+        self._decks = {"Default": 1, "Scratch": 2}
+        self.removed = []
+
+    def all_names_and_ids(self):
+        return [SimpleNamespace(name=name) for name in self._decks]
+
+    def id(self, name):
+        return self._decks[name]
+
+    def remove(self, deck_ids):
+        self.removed.extend(deck_ids)
 
 
 def test_delete_model_removes_unused_model():
@@ -89,26 +120,98 @@ def test_delete_model_requires_model_name():
         )
 
 
-def test_handle_dispatches_delete_model(monkeypatch):
+def test_can_handle_supported_native_actions():
+    assert native_actions.can_handle({"action": "deckNames"})
+    assert native_actions.can_handle({"action": "addNote"})
+    assert native_actions.can_handle({"action": native_actions.DELETE_MODEL_ACTION})
+    assert not native_actions.can_handle({"action": "unknownAction"})
+
+
+def test_handle_dispatches_through_anki_context(monkeypatch):
     seen = {}
+    collection = _Collection(models=_Models(), decks=_Decks())
 
-    def fake_delete_model(params, timeout_s):
+    def fake_run_in_anki(callback, timeout_s):
         seen["timeout_s"] = timeout_s
-        return {"model": params["modelName"], "model_id": 1, "deleted": True}
+        return callback(collection, None)
 
-    monkeypatch.setattr(
-        native_actions,
-        "delete_model",
-        fake_delete_model,
-    )
+    monkeypatch.setattr(native_actions, "_run_in_anki", fake_run_in_anki)
 
     out = native_actions.handle(
-        {"action": native_actions.DELETE_MODEL_ACTION, "params": {"modelName": "Scratch"}},
+        {"action": "deckNames"},
         timeout_s=12.5,
     )
 
-    assert out == {"result": {"model": "Scratch", "model_id": 1, "deleted": True}, "error": None}
+    assert out == {"result": ["Default", "Scratch"], "error": None}
     assert seen["timeout_s"] == 12.5
+
+
+def test_handle_returns_unsupported_action_error():
+    assert native_actions.handle({"action": "unknownAction"}) == {
+        "result": None,
+        "error": "unsupported action: unknownAction",
+    }
+
+
+def test_delete_decks_requires_cards_too():
+    with pytest.raises(ValueError, match="cardsToo=true is required"):
+        native_actions.execute_action(
+            "deleteDecks",
+            {"decks": ["Scratch"]},
+            _Collection(models=_Models(), decks=_Decks()),
+        )
+
+
+def test_delete_decks_removes_existing_decks_only():
+    decks = _Decks()
+
+    result = native_actions.execute_action(
+        "deleteDecks",
+        {"decks": ["Scratch", "Missing"], "cardsToo": True},
+        _Collection(models=_Models(), decks=decks),
+    )
+
+    assert result is None
+    assert decks.removed == [2]
+
+
+def test_create_model_rejects_duplicate_field_names_before_anki_import():
+    with pytest.raises(ValueError, match="duplicate field name"):
+        native_actions.execute_action(
+            "createModel",
+            {
+                "modelName": "Duplicate Fields",
+                "inOrderFields": ["Front", "front"],
+                "cardTemplates": [{"Front": "{{Front}}", "Back": "{{Back}}"}],
+            },
+            _Collection(models=_Models()),
+        )
+
+
+def test_delete_notes_returns_serializable_null_result():
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "deleteNotes",
+        {"notes": ["10", 11]},
+        collection,
+    )
+
+    assert result is None
+    assert collection.removed_notes == [10, 11]
+
+
+def test_set_due_date_returns_serializable_null_result():
+    sched = _Sched()
+
+    result = native_actions.execute_action(
+        "setDueDate",
+        {"cards": ["20", 21], "days": "3"},
+        _Collection(models=_Models(), sched=sched),
+    )
+
+    assert result is None
+    assert sched.set_due_date_calls == [([20, 21], "3", None)]
 
 
 def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
@@ -120,6 +223,7 @@ def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
         "_current_anki_context",
         lambda: (object(), mw),
     )
+    monkeypatch.setattr(native_actions.threading, "current_thread", lambda: object())
 
     with pytest.raises(TimeoutError, match="may still complete"):
         native_actions.delete_model(

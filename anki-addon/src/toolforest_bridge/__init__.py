@@ -1,4 +1,4 @@
-"""Toolforest Bridge: connects local AnkiConnect to the Toolforest gateway.
+"""Toolforest Bridge: connects Anki to the Toolforest gateway.
 
 Anki entry point. Everything Qt/Anki-specific is imported lazily so the pure
 protocol/forwarding modules stay importable (and testable) outside Anki.
