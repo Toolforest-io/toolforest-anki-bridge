@@ -16,6 +16,11 @@ from typing import Any, Callable, Optional
 
 DELETE_MODEL_ACTION = "toolforestDeleteModel"
 _DEFAULT_TIMEOUT_S = 15
+FULL_SYNC_REQUIRED_ERROR = (
+    "Anki requires a full sync. Open Anki and use the Sync button to choose "
+    "Upload to AnkiWeb or Download from AnkiWeb, then retry this tool after "
+    "the desktop sync completes."
+)
 _WRITE_ACTIONS = {
     "addNote",
     "addNotes",
@@ -608,7 +613,7 @@ def _sync(collection: Any, mw: Optional[Any]) -> None:
     output = collection.sync_collection(auth, mw.pm.media_syncing_enabled())
     accepted = [output.NO_CHANGES, output.NORMAL_SYNC]
     if output.required not in accepted:
-        raise ValueError(f"Sync status {output.required} not one of {accepted}")
+        raise ValueError(FULL_SYNC_REQUIRED_ERROR)
     mw.onSync()
     return None
 

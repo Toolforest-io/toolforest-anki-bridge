@@ -78,6 +78,25 @@ class _Sched:
         return object()
 
 
+class _SyncOutput:
+    NO_CHANGES = 0
+    NORMAL_SYNC = 1
+
+    def __init__(self, required):
+        self.required = required
+
+
+class _SyncCollection(_Collection):
+    def __init__(self, required):
+        super().__init__(models=_Models())
+        self.output = _SyncOutput(required)
+        self.sync_args = None
+
+    def sync_collection(self, auth, media_syncing_enabled):
+        self.sync_args = (auth, media_syncing_enabled)
+        return self.output
+
+
 class _Decks:
     def __init__(self):
         self._decks = {"Default": 1, "Scratch": 2}
@@ -302,6 +321,44 @@ def test_change_deck_uses_collection_set_deck_when_available():
 
     assert result is None
     assert collection.set_deck_calls == [([30, 31], 2)]
+
+
+def test_sync_runs_normal_sync_and_calls_anki_sync_ui():
+    collection = _SyncCollection(required=_SyncOutput.NORMAL_SYNC)
+    mw = SimpleNamespace(
+        pm=SimpleNamespace(
+            sync_auth=lambda: "auth-token",
+            media_syncing_enabled=lambda: False,
+        ),
+        onSync=MagicMock(),
+    )
+
+    result = native_actions.execute_action("sync", {}, collection, mw)
+
+    assert result is None
+    assert collection.sync_args == ("auth-token", False)
+    mw.onSync.assert_called_once()
+
+
+def test_sync_full_sync_required_refuses_with_user_action():
+    collection = _SyncCollection(required=2)
+    mw = SimpleNamespace(
+        pm=SimpleNamespace(
+            sync_auth=lambda: "auth-token",
+            media_syncing_enabled=lambda: True,
+        ),
+        onSync=MagicMock(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        native_actions.execute_action("sync", {}, collection, mw)
+
+    message = str(exc_info.value)
+    assert "Anki requires a full sync" in message
+    assert "Sync button" in message
+    assert "Upload to AnkiWeb or Download from AnkiWeb" in message
+    assert "Sync status" not in message
+    mw.onSync.assert_not_called()
 
 
 def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
