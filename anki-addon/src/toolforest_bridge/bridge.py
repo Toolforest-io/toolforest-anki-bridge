@@ -1,9 +1,10 @@
 """Background WebSocket connection to the Toolforest bridge gateway.
 
 Runs a daemon thread holding a single outbound WSS connection. On each
-`request` message it forwards to local AnkiConnect and replies (chunking large
-responses). Reconnects with backoff, pings to beat the idle timeout, and stops
-cleanly on quit, revocation, or displacement by another device.
+`request` message it executes the requested action through Anki's in-process
+APIs and replies (chunking large responses). Reconnects with backoff, pings to
+beat the idle timeout, and stops cleanly on quit, revocation, or displacement
+by another device.
 
 No Anki/Qt imports — the caller passes an on_status callback and is responsible
 for marshalling it onto the main thread.
@@ -34,14 +35,12 @@ class BridgeConnection:
         self,
         ws_endpoint: str,
         token: str,
-        ankiconnect_key: Optional[str] = None,
         agent_version: str = "0.1.0",
         on_status: Optional[Callable[[str], None]] = None,
         on_auth_invalid: Optional[Callable[[], None]] = None,
     ) -> None:
         self._ws_endpoint = ws_endpoint
         self._token = token
-        self._ankiconnect_key = ankiconnect_key
         self._agent_version = agent_version
         self._on_status = on_status or (lambda status: None)
         self._on_auth_invalid = on_auth_invalid or (lambda: None)
@@ -81,6 +80,7 @@ class BridgeConnection:
             f"Authorization: Bearer {self._token}",
             f"X-Bridge-Protocol-Version: {protocol.PROTOCOL_VERSION}",
             f"X-Bridge-Agent-Version: {self._agent_version}",
+            # The gateway still routes this capability by its historical name.
             "X-Bridge-Capability: ankiconnect",
         ]
         backoff = 1
@@ -121,7 +121,7 @@ class BridgeConnection:
         message_type = message.get("type")
 
         if message_type == protocol.TYPE_REQUEST:
-            for reply in forwarder.handle_request(message, self._ankiconnect_key):
+            for reply in forwarder.handle_request(message):
                 app.send(reply)
         elif message_type == protocol.TYPE_DISPLACED:
             # Another device signed in for this capability. Give up the slot;

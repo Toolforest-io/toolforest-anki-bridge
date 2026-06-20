@@ -30,8 +30,86 @@ class _Models:
 
 
 class _Collection:
-    def __init__(self, models):
+    def __init__(self, models, decks=None, sched=None):
         self.models = models
+        self.decks = decks
+        self.sched = sched
+        self.removed_notes = []
+        self.updated_notes = []
+        self.set_deck_calls = []
+
+    def remove_notes(self, note_ids):
+        self.removed_notes.extend(note_ids)
+        return object()
+
+    def get_note(self, note_id):
+        return _Note(note_id)
+
+    def update_note(self, note, skip_undo_entry=False):
+        self.updated_notes.append((note, skip_undo_entry))
+        return object()
+
+    def set_deck(self, card_ids, deck_id):
+        self.set_deck_calls.append((card_ids, deck_id))
+        return object()
+
+
+class _Note:
+    def __init__(self, note_id):
+        self.id = note_id
+        self.fields = {"Front": "old", "Back": "old"}
+
+    def keys(self):
+        return self.fields.keys()
+
+    def __setitem__(self, key, value):
+        self.fields[key] = value
+
+    def __getitem__(self, key):
+        return self.fields[key]
+
+
+class _Sched:
+    def __init__(self):
+        self.set_due_date_calls = []
+
+    def set_due_date(self, card_ids, days, config_key=None):
+        self.set_due_date_calls.append((card_ids, days, config_key))
+        return object()
+
+
+class _SyncOutput:
+    NO_CHANGES = 0
+    NORMAL_SYNC = 1
+
+    def __init__(self, required):
+        self.required = required
+
+
+class _SyncCollection(_Collection):
+    def __init__(self, required):
+        super().__init__(models=_Models())
+        self.output = _SyncOutput(required)
+        self.sync_args = None
+
+    def sync_collection(self, auth, media_syncing_enabled):
+        self.sync_args = (auth, media_syncing_enabled)
+        return self.output
+
+
+class _Decks:
+    def __init__(self):
+        self._decks = {"Default": 1, "Scratch": 2}
+        self.removed = []
+
+    def all_names_and_ids(self):
+        return [SimpleNamespace(name=name) for name in self._decks]
+
+    def id(self, name):
+        return self._decks[name]
+
+    def remove(self, deck_ids):
+        self.removed.extend(deck_ids)
 
 
 def test_delete_model_removes_unused_model():
@@ -89,26 +167,198 @@ def test_delete_model_requires_model_name():
         )
 
 
-def test_handle_dispatches_delete_model(monkeypatch):
+def test_can_handle_supported_native_actions():
+    assert native_actions.can_handle({"action": "deckNames"})
+    assert native_actions.can_handle({"action": "addNote"})
+    assert native_actions.can_handle({"action": native_actions.DELETE_MODEL_ACTION})
+    assert not native_actions.can_handle({"action": "unknownAction"})
+
+
+def test_handle_dispatches_through_anki_context(monkeypatch):
     seen = {}
+    collection = _Collection(models=_Models(), decks=_Decks())
 
-    def fake_delete_model(params, timeout_s):
+    def fake_run_in_anki(callback, timeout_s):
         seen["timeout_s"] = timeout_s
-        return {"model": params["modelName"], "model_id": 1, "deleted": True}
+        return callback(collection, None)
 
-    monkeypatch.setattr(
-        native_actions,
-        "delete_model",
-        fake_delete_model,
-    )
+    monkeypatch.setattr(native_actions, "_run_in_anki", fake_run_in_anki)
 
     out = native_actions.handle(
-        {"action": native_actions.DELETE_MODEL_ACTION, "params": {"modelName": "Scratch"}},
+        {"action": "deckNames"},
         timeout_s=12.5,
     )
 
-    assert out == {"result": {"model": "Scratch", "model_id": 1, "deleted": True}, "error": None}
+    assert out == {"result": ["Default", "Scratch"], "error": None}
     assert seen["timeout_s"] == 12.5
+
+
+def test_handle_returns_unsupported_action_error():
+    assert native_actions.handle({"action": "unknownAction"}) == {
+        "result": None,
+        "error": "unsupported action: unknownAction",
+    }
+
+
+def test_delete_decks_requires_cards_too():
+    with pytest.raises(ValueError, match="cardsToo=true is required"):
+        native_actions.execute_action(
+            "deleteDecks",
+            {"decks": ["Scratch"]},
+            _Collection(models=_Models(), decks=_Decks()),
+        )
+
+
+def test_delete_decks_removes_existing_decks_only():
+    decks = _Decks()
+
+    result = native_actions.execute_action(
+        "deleteDecks",
+        {"decks": ["Scratch", "Missing"], "cardsToo": True},
+        _Collection(models=_Models(), decks=decks),
+    )
+
+    assert result is None
+    assert decks.removed == [2]
+
+
+def test_create_model_rejects_duplicate_field_names_before_anki_import():
+    with pytest.raises(ValueError, match="duplicate field name"):
+        native_actions.execute_action(
+            "createModel",
+            {
+                "modelName": "Duplicate Fields",
+                "inOrderFields": ["Front", "front"],
+                "cardTemplates": [{"Front": "{{Front}}", "Back": "{{Back}}"}],
+            },
+            _Collection(models=_Models()),
+        )
+
+
+def test_delete_notes_returns_serializable_null_result():
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "deleteNotes",
+        {"notes": ["10", 11]},
+        collection,
+    )
+
+    assert result is None
+    assert collection.removed_notes == [10, 11]
+
+
+def test_set_due_date_returns_serializable_null_result():
+    sched = _Sched()
+
+    result = native_actions.execute_action(
+        "setDueDate",
+        {"cards": ["20", 21], "days": "3"},
+        _Collection(models=_Models(), sched=sched),
+    )
+
+    assert result is None
+    assert sched.set_due_date_calls == [([20, 21], "3", None)]
+
+
+def test_add_notes_returns_null_for_rejected_notes_without_rollback(monkeypatch):
+    def fake_add_note(note_input, _collection):
+        if note_input["fields"]["Front"] == "duplicate":
+            raise ValueError("cannot create note because it is a duplicate")
+        return 100 + len(note_input["fields"]["Front"])
+
+    monkeypatch.setattr(native_actions, "_add_note", fake_add_note)
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "addNotes",
+        {
+            "notes": [
+                {"fields": {"Front": "ok"}},
+                {"fields": {"Front": "duplicate"}},
+                {"fields": {"Front": "also ok"}},
+            ]
+        },
+        collection,
+    )
+
+    assert result == [102, None, 107]
+    assert collection.removed_notes == []
+
+
+def test_update_note_fields_matches_field_names_case_insensitively():
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "updateNoteFields",
+        {"note": {"id": 123, "fields": {"front": "new front"}}},
+        collection,
+    )
+
+    assert result is None
+    note, skip_undo_entry = collection.updated_notes[0]
+    assert note.fields == {"Front": "new front", "Back": "old"}
+    assert skip_undo_entry is True
+
+
+def test_update_note_fields_rejects_unknown_fields():
+    with pytest.raises(ValueError, match="field was not found"):
+        native_actions.execute_action(
+            "updateNoteFields",
+            {"note": {"id": 123, "fields": {"Missing": "new"}}},
+            _Collection(models=_Models()),
+        )
+
+
+def test_change_deck_uses_collection_set_deck_when_available():
+    collection = _Collection(models=_Models(), decks=_Decks())
+
+    result = native_actions.execute_action(
+        "changeDeck",
+        {"cards": ["30", 31], "deck": "Scratch"},
+        collection,
+    )
+
+    assert result is None
+    assert collection.set_deck_calls == [([30, 31], 2)]
+
+
+def test_sync_runs_normal_sync_and_calls_anki_sync_ui():
+    collection = _SyncCollection(required=_SyncOutput.NORMAL_SYNC)
+    mw = SimpleNamespace(
+        pm=SimpleNamespace(
+            sync_auth=lambda: "auth-token",
+            media_syncing_enabled=lambda: False,
+        ),
+        onSync=MagicMock(),
+    )
+
+    result = native_actions.execute_action("sync", {}, collection, mw)
+
+    assert result is None
+    assert collection.sync_args == ("auth-token", False)
+    mw.onSync.assert_called_once()
+
+
+def test_sync_full_sync_required_refuses_with_user_action():
+    collection = _SyncCollection(required=2)
+    mw = SimpleNamespace(
+        pm=SimpleNamespace(
+            sync_auth=lambda: "auth-token",
+            media_syncing_enabled=lambda: True,
+        ),
+        onSync=MagicMock(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        native_actions.execute_action("sync", {}, collection, mw)
+
+    message = str(exc_info.value)
+    assert "Anki requires a full sync" in message
+    assert "Sync button" in message
+    assert "Upload to AnkiWeb or Download from AnkiWeb" in message
+    assert "Sync status" not in message
+    mw.onSync.assert_not_called()
 
 
 def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
@@ -120,6 +370,7 @@ def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
         "_current_anki_context",
         lambda: (object(), mw),
     )
+    monkeypatch.setattr(native_actions.threading, "current_thread", lambda: object())
 
     with pytest.raises(TimeoutError, match="may still complete"):
         native_actions.delete_model(

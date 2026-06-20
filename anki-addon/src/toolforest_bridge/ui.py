@@ -100,11 +100,7 @@ def _set_status(status: str) -> None:
 
 
 def start_if_configured() -> None:
-    """On profile open: if AnkiConnect is present and a token is stored, connect."""
-    if not _ankiconnect_available():
-        if _action:
-            _action.setText("Toolforest Bridge: AnkiConnect missing (code 2055492159)")
-        return
+    """On profile open: if a token is stored, connect."""
     config = _config()
     token = config.get("bridge_token")
     if token:
@@ -123,7 +119,6 @@ def _connect(token: str, config: dict) -> None:
     _connection = bridge.BridgeConnection(
         ws_endpoint=_ws_endpoint(config),
         token=token,
-        ankiconnect_key=config.get("ankiconnect_key"),
         on_status=_set_status,
         on_auth_invalid=_clear_stored_token,
     )
@@ -135,14 +130,6 @@ def show_dialog() -> None:
 
 
 def _sign_in() -> None:
-    if not _ankiconnect_available():
-        showWarning(
-            "AnkiConnect isn't installed. Install it first (Tools → Add-ons → "
-            "Get Add-ons… → code 2055492159), restart Anki, then sign in.",
-            title="Toolforest Bridge",
-        )
-        return
-
     config = _config()
     api_base = auth.api_base_from_ws(_ws_endpoint(config))
 
@@ -268,7 +255,7 @@ def _show_status_dialog() -> None:
     _add_detail_row(details, 1, "Environment", "toolforest_environment")
     _add_detail_row(details, 2, "Gateway", "toolforest_gateway")
     _add_detail_row(details, 3, "Device", "toolforest_device")
-    _add_detail_row(details, 4, "Local API", "toolforest_local_api")
+    _add_detail_row(details, 4, "Executor", "toolforest_local_api")
 
     links = QLabel(
         f'<a href="{TOOLFOREST_APP_URL}">Toolforest app</a>'
@@ -415,11 +402,7 @@ def _refresh_status_dialog() -> None:
     environment = _environment_label(endpoint)
     device_id = config.get("bridge_device_id") or "Not registered"
     token_label = "saved" if config.get("bridge_token") else "not saved"
-    local_api = (
-        "AnkiConnect detected on this profile"
-        if _ankiconnect_available()
-        else "AnkiConnect missing"
-    )
+    local_api = "Native Anki API"
 
     _set_label_html(
         dialog,
@@ -482,8 +465,6 @@ def _diagnostics_text() -> str:
     config = _config()
     safe_config = {
         "endpoint_override": config.get("endpoint_override"),
-        "ankiconnect_url": config.get("ankiconnect_url"),
-        "ankiconnect_key": bool(config.get("ankiconnect_key")),
         "bridge_token_saved": bool(config.get("bridge_token")),
         "bridge_device_id": config.get("bridge_device_id"),
     }
@@ -491,7 +472,7 @@ def _diagnostics_text() -> str:
         "status": _status,
         "environment": _environment_label(_ws_endpoint(config)),
         "gateway": _ws_endpoint(config),
-        "ankiconnect_available": _ankiconnect_available(),
+        "executor": "native_anki_api",
         "config": safe_config,
     }
     return json.dumps(data, indent=2, sort_keys=True)
@@ -522,12 +503,3 @@ def _device_name() -> str:
     import platform
 
     return f"Anki on {platform.node() or platform.system()}"[:64]
-
-
-def _ankiconnect_available() -> bool:
-    """AnkiConnect installs into the same Anki process; detect it by add-on dir
-    presence rather than a network probe (fast, no event-loop interaction)."""
-    for module in mw.addonManager.allAddons():
-        if module == "2055492159" or "ankiconnect" in module.lower():
-            return True
-    return False

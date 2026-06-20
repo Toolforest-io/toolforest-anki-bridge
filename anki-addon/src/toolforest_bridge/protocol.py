@@ -18,10 +18,6 @@ from typing import Any, Iterator
 
 PROTOCOL_VERSION = 1
 
-# Local forwarding target. Deliberately a constant, not configuration: the server
-# must never be able to point the bridge at an arbitrary local port.
-ANKICONNECT_URL = "http://127.0.0.1:8765"
-
 DEFAULT_GATEWAY_URL = "wss://bridge.toolforest.io"
 DEFAULT_API_URL = "https://bridge-api.toolforest.io"
 
