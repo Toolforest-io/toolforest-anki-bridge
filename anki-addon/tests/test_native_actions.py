@@ -220,7 +220,7 @@ def test_handle_dispatches_through_anki_context(monkeypatch):
     )
 
     assert out == {"result": ["Default", "Scratch"], "error": None}
-    assert seen["timeout_s"] == 12.5
+    assert 12.0 < seen["timeout_s"] <= 12.5
 
 
 def test_handle_returns_unsupported_action_error():
@@ -495,9 +495,10 @@ def test_add_media_file_url_fetches_public_url_with_pinned_ip(monkeypatch, tmp_p
         assert host == "example.com"
         return [(native_actions.socket.AF_INET, native_actions.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
-    def fake_request(parsed, pinned_ip):
+    def fake_request(parsed, pinned_ip, timeout_s):
         assert parsed.hostname == "example.com"
         assert pinned_ip == "93.184.216.34"
+        assert timeout_s <= 10.0
         return 200, {"content-type": "image/png"}, b"remote png"
 
     monkeypatch.setattr(native_actions.socket, "getaddrinfo", fake_getaddrinfo)
@@ -545,7 +546,7 @@ def test_add_media_file_url_blocks_redirect_to_private(monkeypatch, tmp_path):
         ip = "93.184.216.34" if host == "example.com" else "127.0.0.1"
         return [(native_actions.socket.AF_INET, native_actions.socket.SOCK_STREAM, 6, "", (ip, port))]
 
-    def fake_request(parsed, pinned_ip):
+    def fake_request(parsed, pinned_ip, timeout_s):
         assert parsed.hostname == "example.com"
         return 302, {"location": "http://127.0.0.1/secret"}, b""
 
@@ -556,6 +557,67 @@ def test_add_media_file_url_blocks_redirect_to_private(monkeypatch, tmp_path):
         native_actions.execute_action(
             native_actions.ADD_MEDIA_FILE_ACTION,
             {"filename": "remote.png", "url": "https://example.com/image"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_handle_prefetches_url_before_anki_main_thread(monkeypatch, tmp_path):
+    media = _Media(tmp_path / "media")
+    collection = _Collection(models=_Models(), media=media)
+    seen = []
+
+    def fake_fetch(url, deadline=None):
+        seen.append(("fetch", url))
+        return b"remote png", "image/png"
+
+    def fake_run_in_anki(callback, timeout_s):
+        seen.append(("run", timeout_s))
+        return callback(collection, None)
+
+    monkeypatch.setattr(native_actions, "_fetch_media_url", fake_fetch)
+    monkeypatch.setattr(native_actions, "_run_in_anki", fake_run_in_anki)
+
+    out = native_actions.handle(
+        {
+            "action": native_actions.ADD_MEDIA_FILE_ACTION,
+            "params": {"filename": "remote.png", "url": "https://example.com/image"},
+        },
+        timeout_s=12.0,
+    )
+
+    assert out == {"result": {"filename": "remote.png"}, "error": None}
+    assert seen[0] == ("fetch", "https://example.com/image")
+    assert seen[1][0] == "run"
+
+
+def test_url_validation_blocks_nat64_well_known_prefix(monkeypatch):
+    monkeypatch.setattr(
+        native_actions.socket,
+        "getaddrinfo",
+        lambda host, port, type=0: [
+            (
+                native_actions.socket.AF_INET6,
+                native_actions.socket.SOCK_STREAM,
+                6,
+                "",
+                ("64:ff9b::7f00:1", port, 0, 0),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="private or reserved"):
+        native_actions._validate_public_url_target("https://nat64.example/image.png")
+
+
+def test_get_media_file_rejects_large_file(tmp_path, monkeypatch):
+    media = _Media(tmp_path / "media")
+    media.write_data("large.png", b"large")
+    monkeypatch.setattr(native_actions, "_MAX_MEDIA_GET_BYTES", 4)
+
+    with pytest.raises(ValueError, match="too large"):
+        native_actions.execute_action(
+            native_actions.GET_MEDIA_FILE_ACTION,
+            {"filename": "large.png"},
             _Collection(models=_Models(), media=media),
         )
 

@@ -20,6 +20,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 import urllib.parse
 from typing import Any, Callable, Optional
 
@@ -30,10 +31,12 @@ GET_MEDIA_FILE_ACTION = "toolforestGetMediaFile"
 LIST_MEDIA_FILES_ACTION = "toolforestListMediaFiles"
 DELETE_MEDIA_FILE_ACTION = "toolforestDeleteMediaFile"
 _DEFAULT_TIMEOUT_S = 15
+_MAX_MEDIA_GET_BYTES = 4_000_000
 _MAX_MEDIA_FETCH_BYTES = 50 * 1024 * 1024
 _MAX_MEDIA_REDIRECTS = 3
 _ALLOWED_MEDIA_MIME_PREFIXES = ("image/", "audio/", "video/")
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_WELL_KNOWN_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 FULL_SYNC_REQUIRED_ERROR = (
     "Anki requires a full sync. Open Anki and use the Sync button to choose "
     "Upload to AnkiWeb or Download from AnkiWeb, then retry this tool after "
@@ -87,8 +90,13 @@ def handle(body: dict, timeout_s: float = _DEFAULT_TIMEOUT_S) -> dict:
     if action not in _SUPPORTED_ACTIONS:
         return {"result": None, "error": f"unsupported action: {action}"}
 
+    deadline = time.monotonic() + timeout_s
     try:
-        result = _run_in_anki(lambda col, mw: execute_action(action, params, col, mw), timeout_s)
+        params = _prepare_action_params(action, params, deadline)
+        remaining_s = _remaining_deadline_seconds(deadline, "waiting for Anki")
+        result = _run_in_anki(
+            lambda col, mw: execute_action(action, params, col, mw), remaining_s
+        )
     except Exception as exc:  # noqa: BLE001 - AnkiConnect-compatible error envelope
         return {"result": None, "error": str(exc)}
     return {"result": result, "error": None}
@@ -270,6 +278,37 @@ def _media_path(collection: Any, filename: str) -> str:
     return path
 
 
+def _prepare_action_params(action: str, params: dict, deadline: float) -> dict:
+    if action == ADD_MEDIA_FILE_ACTION:
+        return _prepare_add_media_file_params(params, deadline)
+    return params
+
+
+def _prepare_add_media_file_params(params: dict, deadline: float) -> dict:
+    prepared = dict(params)
+    filename = _sanitize_media_filename(_required(prepared, "filename"))
+    sources = _source_keys(prepared)
+    if len(sources) != 1:
+        raise ValueError("exactly one of data, path, or url is required")
+    if sources[0] != "url":
+        return prepared
+
+    _guess_allowed_media_type(filename)
+    data, content_type = _fetch_media_url(str(prepared["url"]), deadline=deadline)
+    if content_type:
+        _validate_response_media_type(content_type)
+    prepared["_fetched_url_data"] = data
+    prepared["_fetched_url_content_type"] = content_type
+    return prepared
+
+
+def _remaining_deadline_seconds(deadline: float, operation: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"timed out {operation}")
+    return remaining
+
+
 def _decode_media_data(data: Any) -> bytes:
     if not isinstance(data, str) or not data:
         raise ValueError("data must be a non-empty base64 string")
@@ -309,7 +348,12 @@ def _add_media_file(params: dict, collection: Any) -> dict:
         return {"filename": stored}
 
     _guess_allowed_media_type(filename)
-    data, content_type = _fetch_media_url(str(params["url"]))
+    data = params.get("_fetched_url_data")
+    content_type = params.get("_fetched_url_content_type", "")
+    if data is None:
+        data, content_type = _fetch_media_url(
+            str(params["url"]), deadline=time.monotonic() + _DEFAULT_TIMEOUT_S
+        )
     if content_type:
         _validate_response_media_type(content_type)
     stored = collection.media.write_data(filename, data)
@@ -321,6 +365,12 @@ def _get_media_file(params: dict, collection: Any) -> dict:
     path = _media_path(collection, filename)
     if not os.path.isfile(path):
         raise ValueError(f"media file was not found: {filename}")
+    size_bytes = os.path.getsize(path)
+    if size_bytes > _MAX_MEDIA_GET_BYTES:
+        raise ValueError(
+            f"media file is too large to return via this tool: {size_bytes} bytes "
+            f"(maximum {_MAX_MEDIA_GET_BYTES} bytes)"
+        )
     with open(path, "rb") as handle:
         data = handle.read()
     mime_type, _encoding = mimetypes.guess_type(filename)
@@ -328,7 +378,7 @@ def _get_media_file(params: dict, collection: Any) -> dict:
         "filename": filename,
         "data": base64.b64encode(data).decode("ascii"),
         "mime_type": mime_type or "application/octet-stream",
-        "size_bytes": len(data),
+        "size_bytes": size_bytes,
     }
 
 
@@ -372,11 +422,18 @@ def _validate_response_media_type(content_type: str) -> None:
         raise ValueError("URL response must be an image, audio, or video media type")
 
 
-def _fetch_media_url(url: str) -> tuple[bytes, str]:
+def _fetch_media_url(url: str, deadline: Optional[float] = None) -> tuple[bytes, str]:
+    if deadline is None:
+        deadline = time.monotonic() + _DEFAULT_TIMEOUT_S
     current_url = url
     for _redirect_count in range(_MAX_MEDIA_REDIRECTS + 1):
         parsed, pinned_ip = _validate_public_url_target(current_url)
-        status, headers, data = _request_pinned_url(parsed, pinned_ip)
+        request_timeout_s = min(
+            10.0, _remaining_deadline_seconds(deadline, "fetching media URL")
+        )
+        status, headers, data = _request_pinned_url(
+            parsed, pinned_ip, timeout_s=request_timeout_s
+        )
         if status in {301, 302, 303, 307, 308}:
             location = headers.get("location")
             if not location:
@@ -422,6 +479,8 @@ def _is_blocked_ip(raw_ip: str) -> bool:
         return True
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_WELL_KNOWN_NETWORK:
+        return True
     if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NETWORK:
         return True
     if ip.is_multicast:
@@ -470,6 +529,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 def _request_pinned_url(
     parsed: urllib.parse.SplitResult,
     pinned_ip: str,
+    timeout_s: float,
 ) -> tuple[int, dict[str, str], bytes]:
     assert parsed.hostname is not None
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -480,7 +540,7 @@ def _request_pinned_url(
         parsed.hostname,
         port=port,
         pinned_ip=pinned_ip,
-        timeout=10.0,
+        timeout=timeout_s,
     )
     path = urllib.parse.urlunsplit(
         ("", "", parsed.path or "/", parsed.query or "", "")
