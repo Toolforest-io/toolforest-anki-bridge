@@ -486,10 +486,9 @@ def _make_note(note_input: dict, collection: Any) -> tuple[Any, int]:
     note.tags = list(note_input.get("tags") or [])
 
     for name, value in (note_input.get("fields") or {}).items():
-        for anki_name in note.keys():
-            if name.lower() == anki_name.lower():
-                note[anki_name] = value
-                break
+        field_name = _note_field_name(note, name)
+        if field_name is not None:
+            note[field_name] = value
 
     state = int(note.fields_check())
     allow_duplicate = bool((note_input.get("options") or {}).get("allowDuplicate"))
@@ -513,24 +512,31 @@ def _add_note(note_input: dict, collection: Any) -> int:
     return int(note.id)
 
 
-def _add_notes(notes: list[dict], collection: Any) -> list[int]:
-    note_ids: list[int] = []
-    try:
-        for note_input in notes:
+def _add_notes(notes: list[dict], collection: Any) -> list[int | None]:
+    note_ids: list[int | None] = []
+    for note_input in notes:
+        try:
             note_ids.append(_add_note(note_input, collection))
-    except Exception:
-        if note_ids:
-            collection.remove_notes(note_ids)
-        raise
+        except Exception:
+            note_ids.append(None)
     return note_ids
 
 
 def _update_note_fields(note_update: dict, collection: Any) -> None:
     note = _get_note(collection, int(_required(note_update, "id")))
     for name, value in (note_update.get("fields") or {}).items():
-        if name in note:
-            note[name] = value
+        field_name = _note_field_name(note, name)
+        if field_name is None:
+            raise ValueError(f"field was not found: {name}")
+        note[field_name] = value
     collection.update_note(note, skip_undo_entry=True)
+    return None
+
+
+def _note_field_name(note: Any, requested_name: str) -> Optional[str]:
+    for anki_name in note.keys():
+        if requested_name.casefold() == anki_name.casefold():
+            return anki_name
     return None
 
 
@@ -573,12 +579,16 @@ def _set_suspended(params: dict, collection: Any, suspended: bool) -> bool:
 
 
 def _change_deck(params: dict, collection: Any) -> None:
-    import anki.utils  # type: ignore
-
     cards = [int(card_id) for card_id in (params.get("cards") or [])]
     if not cards:
         return None
     deck_id = collection.decks.id(_required(params, "deck"))
+    if hasattr(collection, "set_deck"):
+        collection.set_deck(cards, deck_id)
+        return None
+
+    import anki.utils  # type: ignore
+
     collection.sched.remFromDyn(cards)
     collection.db.execute(
         "update cards set usn=?, mod=?, did=? where id in " + anki.utils.ids2str(cards),

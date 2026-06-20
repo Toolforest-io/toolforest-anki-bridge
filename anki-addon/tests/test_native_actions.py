@@ -35,10 +35,38 @@ class _Collection:
         self.decks = decks
         self.sched = sched
         self.removed_notes = []
+        self.updated_notes = []
+        self.set_deck_calls = []
 
     def remove_notes(self, note_ids):
         self.removed_notes.extend(note_ids)
         return object()
+
+    def get_note(self, note_id):
+        return _Note(note_id)
+
+    def update_note(self, note, skip_undo_entry=False):
+        self.updated_notes.append((note, skip_undo_entry))
+        return object()
+
+    def set_deck(self, card_ids, deck_id):
+        self.set_deck_calls.append((card_ids, deck_id))
+        return object()
+
+
+class _Note:
+    def __init__(self, note_id):
+        self.id = note_id
+        self.fields = {"Front": "old", "Back": "old"}
+
+    def keys(self):
+        return self.fields.keys()
+
+    def __setitem__(self, key, value):
+        self.fields[key] = value
+
+    def __getitem__(self, key):
+        return self.fields[key]
 
 
 class _Sched:
@@ -212,6 +240,68 @@ def test_set_due_date_returns_serializable_null_result():
 
     assert result is None
     assert sched.set_due_date_calls == [([20, 21], "3", None)]
+
+
+def test_add_notes_returns_null_for_rejected_notes_without_rollback(monkeypatch):
+    def fake_add_note(note_input, _collection):
+        if note_input["fields"]["Front"] == "duplicate":
+            raise ValueError("cannot create note because it is a duplicate")
+        return 100 + len(note_input["fields"]["Front"])
+
+    monkeypatch.setattr(native_actions, "_add_note", fake_add_note)
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "addNotes",
+        {
+            "notes": [
+                {"fields": {"Front": "ok"}},
+                {"fields": {"Front": "duplicate"}},
+                {"fields": {"Front": "also ok"}},
+            ]
+        },
+        collection,
+    )
+
+    assert result == [102, None, 107]
+    assert collection.removed_notes == []
+
+
+def test_update_note_fields_matches_field_names_case_insensitively():
+    collection = _Collection(models=_Models())
+
+    result = native_actions.execute_action(
+        "updateNoteFields",
+        {"note": {"id": 123, "fields": {"front": "new front"}}},
+        collection,
+    )
+
+    assert result is None
+    note, skip_undo_entry = collection.updated_notes[0]
+    assert note.fields == {"Front": "new front", "Back": "old"}
+    assert skip_undo_entry is True
+
+
+def test_update_note_fields_rejects_unknown_fields():
+    with pytest.raises(ValueError, match="field was not found"):
+        native_actions.execute_action(
+            "updateNoteFields",
+            {"note": {"id": 123, "fields": {"Missing": "new"}}},
+            _Collection(models=_Models()),
+        )
+
+
+def test_change_deck_uses_collection_set_deck_when_available():
+    collection = _Collection(models=_Models(), decks=_Decks())
+
+    result = native_actions.execute_action(
+        "changeDeck",
+        {"cards": ["30", 31], "deck": "Scratch"},
+        collection,
+    )
+
+    assert result is None
+    assert collection.set_deck_calls == [([30, 31], 2)]
 
 
 def test_delete_model_timeout_warns_operation_may_complete(monkeypatch):
