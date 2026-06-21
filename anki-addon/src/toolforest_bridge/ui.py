@@ -28,7 +28,7 @@ from aqt.qt import (
 )
 from aqt.utils import showWarning
 
-from . import auth, bridge, protocol
+from . import auth, bridge, protocol, version
 
 ADDON = __name__.split(".")[0]
 
@@ -253,9 +253,10 @@ def _show_status_dialog() -> None:
     layout.addLayout(details)
     _add_detail_row(details, 0, "Status", "toolforest_status")
     _add_detail_row(details, 1, "Environment", "toolforest_environment")
-    _add_detail_row(details, 2, "Gateway", "toolforest_gateway")
-    _add_detail_row(details, 3, "Device", "toolforest_device")
-    _add_detail_row(details, 4, "Executor", "toolforest_local_api")
+    _add_detail_row(details, 2, "Version", "toolforest_version")
+    _add_detail_row(details, 3, "Gateway", "toolforest_gateway")
+    _add_detail_row(details, 4, "Device", "toolforest_device")
+    _add_detail_row(details, 5, "Executor", "toolforest_local_api")
 
     links = QLabel(
         f'<a href="{TOOLFOREST_APP_URL}">Toolforest app</a>'
@@ -412,6 +413,7 @@ def _refresh_status_dialog() -> None:
     )
     _set_label_text(dialog, "toolforest_status", status_text)
     _set_label_text(dialog, "toolforest_environment", environment)
+    _set_label_text(dialog, "toolforest_version", version.addon_version())
     _set_label_text(dialog, "toolforest_gateway", endpoint)
     _set_label_text(dialog, "toolforest_device", f"{device_id} ({token_label})")
     _set_label_text(dialog, "toolforest_local_api", local_api)
@@ -470,6 +472,7 @@ def _diagnostics_text() -> str:
     }
     data = {
         "status": _status,
+        "version": version.addon_version(),
         "environment": _environment_label(_ws_endpoint(config)),
         "gateway": _ws_endpoint(config),
         "executor": "native_anki_api",
