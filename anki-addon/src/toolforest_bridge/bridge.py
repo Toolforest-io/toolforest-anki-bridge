@@ -16,7 +16,7 @@ import json
 import threading
 from typing import Callable, Optional
 
-from . import forwarder, protocol
+from . import forwarder, protocol, version
 from .vendor import websocket
 
 # Status strings the UI maps to menu text / indicator.
@@ -35,13 +35,13 @@ class BridgeConnection:
         self,
         ws_endpoint: str,
         token: str,
-        agent_version: str = "0.1.0",
+        agent_version: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
         on_auth_invalid: Optional[Callable[[], None]] = None,
     ) -> None:
         self._ws_endpoint = ws_endpoint
         self._token = token
-        self._agent_version = agent_version
+        self._agent_version = agent_version or version.addon_version()
         self._on_status = on_status or (lambda status: None)
         self._on_auth_invalid = on_auth_invalid or (lambda: None)
 

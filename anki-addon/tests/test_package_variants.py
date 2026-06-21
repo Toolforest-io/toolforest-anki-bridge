@@ -17,7 +17,7 @@ def test_install_variant_preserves_existing_config_and_meta(monkeypatch, tmp_pat
     source = tmp_path / "source"
     source.mkdir()
     (source / "manifest.json").write_text(
-        '{"package": "toolforest_bridge", "name": "Toolforest Bridge"}\n'
+        '{"package": "toolforest_bridge", "name": "Toolforest Bridge", "version": "0.1.0"}\n'
     )
     (source / "config.json").write_text(
         '{"bridge_token": null, "endpoint_override": null}\n'
@@ -39,7 +39,8 @@ def test_install_variant_preserves_existing_config_and_meta(monkeypatch, tmp_pat
     assert (target / "manifest.json").read_text() == (
         '{\n'
         '    "package": "toolforest_bridge",\n'
-        '    "name": "Toolforest Bridge"\n'
+        '    "name": "Toolforest Bridge",\n'
+        '    "version": "0.1.0"\n'
         '}\n'
     )
     assert (target / "config.json").read_text() == existing_config
