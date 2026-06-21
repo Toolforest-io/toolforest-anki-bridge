@@ -10,12 +10,33 @@ normal Python process.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import fnmatch
+import http.client
+import ipaddress
+import mimetypes
+import os
+import socket
+import ssl
 import threading
+import time
+import urllib.parse
 from typing import Any, Callable, Optional
 
 
 DELETE_MODEL_ACTION = "toolforestDeleteModel"
+ADD_MEDIA_FILE_ACTION = "toolforestAddMediaFile"
+GET_MEDIA_FILE_ACTION = "toolforestGetMediaFile"
+LIST_MEDIA_FILES_ACTION = "toolforestListMediaFiles"
+DELETE_MEDIA_FILE_ACTION = "toolforestDeleteMediaFile"
 _DEFAULT_TIMEOUT_S = 15
+_MAX_MEDIA_GET_BYTES = 4_000_000
+_MAX_MEDIA_FETCH_BYTES = 50 * 1024 * 1024
+_MAX_MEDIA_REDIRECTS = 3
+_ALLOWED_MEDIA_MIME_PREFIXES = ("image/", "audio/", "video/")
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_WELL_KNOWN_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 FULL_SYNC_REQUIRED_ERROR = (
     "Anki requires a full sync. Open Anki and use the Sync button to choose "
     "Upload to AnkiWeb or Download from AnkiWeb, then retry this tool after "
@@ -37,6 +58,8 @@ _WRITE_ACTIONS = {
     "sync",
     "unsuspend",
     "updateNoteFields",
+    ADD_MEDIA_FILE_ACTION,
+    DELETE_MEDIA_FILE_ACTION,
     DELETE_MODEL_ACTION,
 }
 _SUPPORTED_ACTIONS = {
@@ -51,6 +74,8 @@ _SUPPORTED_ACTIONS = {
     "modelTemplates",
     "notesInfo",
     "version",
+    GET_MEDIA_FILE_ACTION,
+    LIST_MEDIA_FILES_ACTION,
     *_WRITE_ACTIONS,
 }
 
@@ -65,8 +90,13 @@ def handle(body: dict, timeout_s: float = _DEFAULT_TIMEOUT_S) -> dict:
     if action not in _SUPPORTED_ACTIONS:
         return {"result": None, "error": f"unsupported action: {action}"}
 
+    deadline = time.monotonic() + timeout_s
     try:
-        result = _run_in_anki(lambda col, mw: execute_action(action, params, col, mw), timeout_s)
+        params = _prepare_action_params(action, params, deadline)
+        remaining_s = _remaining_deadline_seconds(deadline, "waiting for Anki")
+        result = _run_in_anki(
+            lambda col, mw: execute_action(action, params, col, mw), remaining_s
+        )
     except Exception as exc:  # noqa: BLE001 - AnkiConnect-compatible error envelope
         return {"result": None, "error": str(exc)}
     return {"result": result, "error": None}
@@ -134,6 +164,14 @@ def execute_action(action: str, params: dict, collection: Any, mw: Optional[Any]
         return _change_deck(params, collection)
     if action == "sync":
         return _sync(collection, mw)
+    if action == ADD_MEDIA_FILE_ACTION:
+        return _add_media_file(params, collection)
+    if action == GET_MEDIA_FILE_ACTION:
+        return _get_media_file(params, collection)
+    if action == LIST_MEDIA_FILES_ACTION:
+        return _list_media_files(params, collection)
+    if action == DELETE_MEDIA_FILE_ACTION:
+        return _delete_media_file(params, collection)
     if action == DELETE_MODEL_ACTION:
         return delete_model(params, collection=collection, mw=mw)
 
@@ -201,6 +239,329 @@ def _mark_collection_changed(mw: Optional[Any]) -> None:
         mw.requireReset()
     except Exception:
         pass
+
+
+def _sanitize_media_filename(raw_filename: Any) -> str:
+    if not isinstance(raw_filename, str) or not raw_filename.strip():
+        raise ValueError("filename is required")
+    filename = raw_filename.strip()
+    if "\x00" in filename:
+        raise ValueError("filename cannot contain null bytes")
+    if "/" in filename or "\\" in filename:
+        raise ValueError("filename must be a basename, not a path")
+    if filename in {".", ".."} or filename != os.path.basename(filename):
+        raise ValueError("filename must be a basename, not a path")
+    return filename
+
+
+def _guess_allowed_media_type(filename: str) -> str:
+    mime_type, _encoding = mimetypes.guess_type(filename)
+    if not mime_type or not mime_type.startswith(_ALLOWED_MEDIA_MIME_PREFIXES):
+        raise ValueError(
+            "media file must have an image, audio, or video filename extension"
+        )
+    return mime_type
+
+
+def _media_dir(collection: Any) -> str:
+    path = collection.media.dir()
+    if not path:
+        raise ValueError("Anki media directory is not available")
+    return os.path.realpath(path)
+
+
+def _media_path(collection: Any, filename: str) -> str:
+    media_dir = _media_dir(collection)
+    path = os.path.realpath(os.path.join(media_dir, filename))
+    if os.path.commonpath([media_dir, path]) != media_dir:
+        raise ValueError("filename must resolve inside the Anki media directory")
+    return path
+
+
+def _prepare_action_params(action: str, params: dict, deadline: float) -> dict:
+    if action == ADD_MEDIA_FILE_ACTION:
+        return _prepare_add_media_file_params(params, deadline)
+    return params
+
+
+def _prepare_add_media_file_params(params: dict, deadline: float) -> dict:
+    prepared = dict(params)
+    filename = _sanitize_media_filename(_required(prepared, "filename"))
+    sources = _source_keys(prepared)
+    if len(sources) != 1:
+        raise ValueError("exactly one of data, path, or url is required")
+    if sources[0] != "url":
+        return prepared
+
+    _guess_allowed_media_type(filename)
+    data, content_type = _fetch_media_url(str(prepared["url"]), deadline=deadline)
+    if content_type:
+        _validate_response_media_type(content_type)
+    prepared["_fetched_url_data"] = data
+    prepared["_fetched_url_content_type"] = content_type
+    return prepared
+
+
+def _remaining_deadline_seconds(deadline: float, operation: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"timed out {operation}")
+    return remaining
+
+
+def _decode_media_data(data: Any) -> bytes:
+    if not isinstance(data, str) or not data:
+        raise ValueError("data must be a non-empty base64 string")
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("data must be valid base64") from exc
+
+
+def _source_keys(params: dict) -> list[str]:
+    return [key for key in ("data", "path", "url") if params.get(key) is not None]
+
+
+def _add_media_file(params: dict, collection: Any) -> dict:
+    filename = _sanitize_media_filename(_required(params, "filename"))
+    sources = _source_keys(params)
+    if len(sources) != 1:
+        raise ValueError("exactly one of data, path, or url is required")
+
+    source = sources[0]
+    if source == "data":
+        _guess_allowed_media_type(filename)
+        stored = collection.media.write_data(filename, _decode_media_data(params["data"]))
+        return {"filename": stored}
+
+    if source == "path":
+        path = params["path"]
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise ValueError("path must be an absolute local file path")
+        if not os.path.isfile(path):
+            raise ValueError("path must point to an existing file")
+        actual_filename = _sanitize_media_filename(os.path.basename(path))
+        if filename != actual_filename:
+            raise ValueError("filename must match the basename of path")
+        _guess_allowed_media_type(actual_filename)
+        stored = collection.media.add_file(path)
+        return {"filename": stored}
+
+    _guess_allowed_media_type(filename)
+    data = params.get("_fetched_url_data")
+    content_type = params.get("_fetched_url_content_type", "")
+    if data is None:
+        data, content_type = _fetch_media_url(
+            str(params["url"]), deadline=time.monotonic() + _DEFAULT_TIMEOUT_S
+        )
+    if content_type:
+        _validate_response_media_type(content_type)
+    stored = collection.media.write_data(filename, data)
+    return {"filename": stored}
+
+
+def _get_media_file(params: dict, collection: Any) -> dict:
+    filename = _sanitize_media_filename(_required(params, "filename"))
+    path = _media_path(collection, filename)
+    if not os.path.isfile(path):
+        raise ValueError(f"media file was not found: {filename}")
+    size_bytes = os.path.getsize(path)
+    if size_bytes > _MAX_MEDIA_GET_BYTES:
+        raise ValueError(
+            f"media file is too large to return via this tool: {size_bytes} bytes "
+            f"(maximum {_MAX_MEDIA_GET_BYTES} bytes)"
+        )
+    with open(path, "rb") as handle:
+        data = handle.read()
+    mime_type, _encoding = mimetypes.guess_type(filename)
+    return {
+        "filename": filename,
+        "data": base64.b64encode(data).decode("ascii"),
+        "mime_type": mime_type or "application/octet-stream",
+        "size_bytes": size_bytes,
+    }
+
+
+def _list_media_files(params: dict, collection: Any) -> dict:
+    pattern = params.get("pattern")
+    if pattern is not None:
+        if not isinstance(pattern, str) or "\x00" in pattern:
+            raise ValueError("pattern must be a string without null bytes")
+        if "/" in pattern or "\\" in pattern:
+            raise ValueError("pattern must not contain path separators")
+
+    media_dir = _media_dir(collection)
+    filenames = []
+    for name in os.listdir(media_dir):
+        try:
+            filename = _sanitize_media_filename(name)
+        except ValueError:
+            continue
+        path = os.path.join(media_dir, filename)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        if pattern is not None and not fnmatch.fnmatchcase(filename, pattern):
+            continue
+        filenames.append(filename)
+    return {"filenames": sorted(filenames)}
+
+
+def _delete_media_file(params: dict, collection: Any) -> dict:
+    if params.get("confirm") is not True:
+        raise ValueError("confirm=true is required")
+    filename = _sanitize_media_filename(_required(params, "filename"))
+    if not os.path.isfile(_media_path(collection, filename)):
+        raise ValueError(f"media file was not found: {filename}")
+    collection.media.trash_files([filename])
+    return {"filename": filename, "deleted": True}
+
+
+def _validate_response_media_type(content_type: str) -> None:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type and not media_type.startswith(_ALLOWED_MEDIA_MIME_PREFIXES):
+        raise ValueError("URL response must be an image, audio, or video media type")
+
+
+def _fetch_media_url(url: str, deadline: Optional[float] = None) -> tuple[bytes, str]:
+    if deadline is None:
+        deadline = time.monotonic() + _DEFAULT_TIMEOUT_S
+    current_url = url
+    for _redirect_count in range(_MAX_MEDIA_REDIRECTS + 1):
+        parsed, pinned_ip = _validate_public_url_target(current_url)
+        request_timeout_s = min(
+            10.0, _remaining_deadline_seconds(deadline, "fetching media URL")
+        )
+        status, headers, data = _request_pinned_url(
+            parsed, pinned_ip, timeout_s=request_timeout_s
+        )
+        if status in {301, 302, 303, 307, 308}:
+            location = headers.get("location")
+            if not location:
+                raise ValueError("URL redirect did not include a Location header")
+            current_url = urllib.parse.urljoin(current_url, location)
+            continue
+        if status < 200 or status >= 300:
+            raise ValueError(f"URL returned HTTP status {status}")
+        return data, headers.get("content-type", "")
+    raise ValueError("URL redirected too many times")
+
+
+def _validate_public_url_target(url: str) -> tuple[urllib.parse.SplitResult, str]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("url must use http or https")
+    if parsed.username or parsed.password:
+        raise ValueError("url must not include credentials")
+    if not parsed.hostname:
+        raise ValueError("url hostname is required")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    infos = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    ips: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        ip = str(sockaddr[0])
+        if ip not in ips:
+            ips.append(ip)
+    if not ips:
+        raise ValueError("url hostname did not resolve")
+
+    for ip in ips:
+        if _is_blocked_ip(ip):
+            raise ValueError("url resolved to a private or reserved IP address")
+    return parsed, ips[0]
+
+
+def _is_blocked_ip(raw_ip: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(raw_ip)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_WELL_KNOWN_NETWORK:
+        return True
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NETWORK:
+        return True
+    if ip.is_multicast:
+        return True
+    return not ip.is_global
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pinned_ip: str,
+        timeout: float,
+    ) -> None:
+        super().__init__(host, port=port, timeout=timeout)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), timeout=self.timeout
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pinned_ip: str,
+        timeout: float,
+    ) -> None:
+        super().__init__(
+            host,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _request_pinned_url(
+    parsed: urllib.parse.SplitResult,
+    pinned_ip: str,
+    timeout_s: float,
+) -> tuple[int, dict[str, str], bytes]:
+    assert parsed.hostname is not None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    connection_cls = (
+        _PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection
+    )
+    connection = connection_cls(
+        parsed.hostname,
+        port=port,
+        pinned_ip=pinned_ip,
+        timeout=timeout_s,
+    )
+    path = urllib.parse.urlunsplit(
+        ("", "", parsed.path or "/", parsed.query or "", "")
+    )
+    try:
+        connection.request(
+            "GET",
+            path,
+            headers={
+                "Accept": "image/*, audio/*, video/*",
+                "User-Agent": "Toolforest-Anki-Bridge",
+            },
+        )
+        response = connection.getresponse()
+        headers = {key.lower(): value for key, value in response.getheaders()}
+        data = response.read(_MAX_MEDIA_FETCH_BYTES + 1)
+    finally:
+        connection.close()
+    if len(data) > _MAX_MEDIA_FETCH_BYTES:
+        raise ValueError("URL response is too large")
+    return int(response.status), headers, data
 
 
 def _deck_names(collection: Any) -> list[str]:

@@ -1,3 +1,4 @@
+import base64
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,10 +31,11 @@ class _Models:
 
 
 class _Collection:
-    def __init__(self, models, decks=None, sched=None):
+    def __init__(self, models, decks=None, sched=None, media=None):
         self.models = models
         self.decks = decks
         self.sched = sched
+        self.media = media
         self.removed_notes = []
         self.updated_notes = []
         self.set_deck_calls = []
@@ -112,6 +114,30 @@ class _Decks:
         self.removed.extend(deck_ids)
 
 
+class _Media:
+    def __init__(self, media_dir):
+        self._dir = Path(media_dir)
+        self._dir.mkdir()
+        self.trashed = []
+
+    def dir(self):
+        return str(self._dir)
+
+    def write_data(self, desired_fname, data):
+        (self._dir / desired_fname).write_bytes(data)
+        return desired_fname
+
+    def add_file(self, path):
+        filename = Path(path).name
+        (self._dir / filename).write_bytes(Path(path).read_bytes())
+        return filename
+
+    def trash_files(self, fnames):
+        self.trashed.extend(fnames)
+        for filename in fnames:
+            (self._dir / filename).unlink(missing_ok=True)
+
+
 def test_delete_model_removes_unused_model():
     models = _Models(model={"id": 123, "name": "Scratch"}, use_count=0)
     mw = MagicMock()
@@ -170,6 +196,10 @@ def test_delete_model_requires_model_name():
 def test_can_handle_supported_native_actions():
     assert native_actions.can_handle({"action": "deckNames"})
     assert native_actions.can_handle({"action": "addNote"})
+    assert native_actions.can_handle({"action": native_actions.ADD_MEDIA_FILE_ACTION})
+    assert native_actions.can_handle({"action": native_actions.GET_MEDIA_FILE_ACTION})
+    assert native_actions.can_handle({"action": native_actions.LIST_MEDIA_FILES_ACTION})
+    assert native_actions.can_handle({"action": native_actions.DELETE_MEDIA_FILE_ACTION})
     assert native_actions.can_handle({"action": native_actions.DELETE_MODEL_ACTION})
     assert not native_actions.can_handle({"action": "unknownAction"})
 
@@ -190,7 +220,7 @@ def test_handle_dispatches_through_anki_context(monkeypatch):
     )
 
     assert out == {"result": ["Default", "Scratch"], "error": None}
-    assert seen["timeout_s"] == 12.5
+    assert 12.0 < seen["timeout_s"] <= 12.5
 
 
 def test_handle_returns_unsupported_action_error():
@@ -321,6 +351,275 @@ def test_change_deck_uses_collection_set_deck_when_available():
 
     assert result is None
     assert collection.set_deck_calls == [([30, 31], 2)]
+
+
+def test_add_media_file_base64_writes_data(tmp_path):
+    media = _Media(tmp_path / "media")
+    collection = _Collection(models=_Models(), media=media)
+
+    result = native_actions.execute_action(
+        native_actions.ADD_MEDIA_FILE_ACTION,
+        {
+            "filename": "image.png",
+            "data": base64.b64encode(b"png bytes").decode("ascii"),
+        },
+        collection,
+    )
+
+    assert result == {"filename": "image.png"}
+    assert (Path(media.dir()) / "image.png").read_bytes() == b"png bytes"
+
+
+def test_add_media_file_path_imports_local_file(tmp_path):
+    media = _Media(tmp_path / "media")
+    source = tmp_path / "sound.mp3"
+    source.write_bytes(b"mp3 bytes")
+
+    result = native_actions.execute_action(
+        native_actions.ADD_MEDIA_FILE_ACTION,
+        {"filename": "sound.mp3", "path": str(source)},
+        _Collection(models=_Models(), media=media),
+    )
+
+    assert result == {"filename": "sound.mp3"}
+    assert (Path(media.dir()) / "sound.mp3").read_bytes() == b"mp3 bytes"
+
+
+def test_add_media_file_rejects_unsafe_filename(tmp_path):
+    media = _Media(tmp_path / "media")
+
+    with pytest.raises(ValueError, match="basename"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {
+                "filename": "../image.png",
+                "data": base64.b64encode(b"png bytes").decode("ascii"),
+            },
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_add_media_file_requires_one_source(tmp_path):
+    media = _Media(tmp_path / "media")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {
+                "filename": "image.png",
+                "data": base64.b64encode(b"png bytes").decode("ascii"),
+                "path": str(tmp_path / "image.png"),
+            },
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_add_media_file_path_filename_must_match_basename(tmp_path):
+    media = _Media(tmp_path / "media")
+    source = tmp_path / "actual.png"
+    source.write_bytes(b"png bytes")
+
+    with pytest.raises(ValueError, match="match the basename"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {"filename": "wanted.png", "path": str(source)},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_get_list_delete_media_file_round_trip(tmp_path):
+    media = _Media(tmp_path / "media")
+    media.write_data("one.png", b"one")
+    media.write_data("two.mp3", b"two")
+    media.write_data("skip.txt", b"skip")
+    collection = _Collection(models=_Models(), media=media)
+
+    listed = native_actions.execute_action(
+        native_actions.LIST_MEDIA_FILES_ACTION,
+        {"pattern": "*.png"},
+        collection,
+    )
+    fetched = native_actions.execute_action(
+        native_actions.GET_MEDIA_FILE_ACTION,
+        {"filename": "one.png"},
+        collection,
+    )
+    deleted = native_actions.execute_action(
+        native_actions.DELETE_MEDIA_FILE_ACTION,
+        {"filename": "one.png", "confirm": True},
+        collection,
+    )
+
+    assert listed == {"filenames": ["one.png"]}
+    assert fetched == {
+        "filename": "one.png",
+        "data": base64.b64encode(b"one").decode("ascii"),
+        "mime_type": "image/png",
+        "size_bytes": 3,
+    }
+    assert deleted == {"filename": "one.png", "deleted": True}
+    assert media.trashed == ["one.png"]
+    assert not (Path(media.dir()) / "one.png").exists()
+
+
+def test_get_media_file_rejects_symlink_escape(tmp_path):
+    media = _Media(tmp_path / "media")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    (Path(media.dir()) / "leak.png").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="inside the Anki media directory"):
+        native_actions.execute_action(
+            native_actions.GET_MEDIA_FILE_ACTION,
+            {"filename": "leak.png"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_delete_media_file_requires_confirm(tmp_path):
+    media = _Media(tmp_path / "media")
+    media.write_data("image.png", b"png bytes")
+
+    with pytest.raises(ValueError, match="confirm=true"):
+        native_actions.execute_action(
+            native_actions.DELETE_MEDIA_FILE_ACTION,
+            {"filename": "image.png"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_add_media_file_url_fetches_public_url_with_pinned_ip(monkeypatch, tmp_path):
+    media = _Media(tmp_path / "media")
+
+    def fake_getaddrinfo(host, port, type=0):
+        assert host == "example.com"
+        return [(native_actions.socket.AF_INET, native_actions.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    def fake_request(parsed, pinned_ip, timeout_s):
+        assert parsed.hostname == "example.com"
+        assert pinned_ip == "93.184.216.34"
+        assert timeout_s <= 10.0
+        return 200, {"content-type": "image/png"}, b"remote png"
+
+    monkeypatch.setattr(native_actions.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(native_actions, "_request_pinned_url", fake_request)
+
+    result = native_actions.execute_action(
+        native_actions.ADD_MEDIA_FILE_ACTION,
+        {"filename": "remote.png", "url": "https://example.com/image"},
+        _Collection(models=_Models(), media=media),
+    )
+
+    assert result == {"filename": "remote.png"}
+    assert (Path(media.dir()) / "remote.png").read_bytes() == b"remote png"
+
+
+def test_add_media_file_url_blocks_private_ip(monkeypatch, tmp_path):
+    media = _Media(tmp_path / "media")
+
+    monkeypatch.setattr(
+        native_actions.socket,
+        "getaddrinfo",
+        lambda host, port, type=0: [
+            (
+                native_actions.socket.AF_INET,
+                native_actions.socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", port),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="private or reserved"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {"filename": "remote.png", "url": "https://private.example/image"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_add_media_file_url_blocks_redirect_to_private(monkeypatch, tmp_path):
+    media = _Media(tmp_path / "media")
+
+    def fake_getaddrinfo(host, port, type=0):
+        ip = "93.184.216.34" if host == "example.com" else "127.0.0.1"
+        return [(native_actions.socket.AF_INET, native_actions.socket.SOCK_STREAM, 6, "", (ip, port))]
+
+    def fake_request(parsed, pinned_ip, timeout_s):
+        assert parsed.hostname == "example.com"
+        return 302, {"location": "http://127.0.0.1/secret"}, b""
+
+    monkeypatch.setattr(native_actions.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(native_actions, "_request_pinned_url", fake_request)
+
+    with pytest.raises(ValueError, match="private or reserved"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {"filename": "remote.png", "url": "https://example.com/image"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
+def test_handle_prefetches_url_before_anki_main_thread(monkeypatch, tmp_path):
+    media = _Media(tmp_path / "media")
+    collection = _Collection(models=_Models(), media=media)
+    seen = []
+
+    def fake_fetch(url, deadline=None):
+        seen.append(("fetch", url))
+        return b"remote png", "image/png"
+
+    def fake_run_in_anki(callback, timeout_s):
+        seen.append(("run", timeout_s))
+        return callback(collection, None)
+
+    monkeypatch.setattr(native_actions, "_fetch_media_url", fake_fetch)
+    monkeypatch.setattr(native_actions, "_run_in_anki", fake_run_in_anki)
+
+    out = native_actions.handle(
+        {
+            "action": native_actions.ADD_MEDIA_FILE_ACTION,
+            "params": {"filename": "remote.png", "url": "https://example.com/image"},
+        },
+        timeout_s=12.0,
+    )
+
+    assert out == {"result": {"filename": "remote.png"}, "error": None}
+    assert seen[0] == ("fetch", "https://example.com/image")
+    assert seen[1][0] == "run"
+
+
+def test_url_validation_blocks_nat64_well_known_prefix(monkeypatch):
+    monkeypatch.setattr(
+        native_actions.socket,
+        "getaddrinfo",
+        lambda host, port, type=0: [
+            (
+                native_actions.socket.AF_INET6,
+                native_actions.socket.SOCK_STREAM,
+                6,
+                "",
+                ("64:ff9b::7f00:1", port, 0, 0),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="private or reserved"):
+        native_actions._validate_public_url_target("https://nat64.example/image.png")
+
+
+def test_get_media_file_rejects_large_file(tmp_path, monkeypatch):
+    media = _Media(tmp_path / "media")
+    media.write_data("large.png", b"large")
+    monkeypatch.setattr(native_actions, "_MAX_MEDIA_GET_BYTES", 4)
+
+    with pytest.raises(ValueError, match="too large"):
+        native_actions.execute_action(
+            native_actions.GET_MEDIA_FILE_ACTION,
+            {"filename": "large.png"},
+            _Collection(models=_Models(), media=media),
+        )
 
 
 def test_sync_runs_normal_sync_and_calls_anki_sync_ui():
