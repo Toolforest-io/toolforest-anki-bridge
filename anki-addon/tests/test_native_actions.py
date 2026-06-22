@@ -1,4 +1,5 @@
 import base64
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -512,6 +513,66 @@ def test_add_media_file_url_fetches_public_url_with_pinned_ip(monkeypatch, tmp_p
 
     assert result == {"filename": "remote.png"}
     assert (Path(media.dir()) / "remote.png").read_bytes() == b"remote png"
+
+
+def test_fetch_media_url_does_not_reresolve_hostname_after_pinning(monkeypatch):
+    resolve_calls = []
+    sockets = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.sent = b""
+
+        def sendall(self, data):
+            self.sent += data
+
+        def makefile(self, mode):
+            assert mode == "rb"
+            return io.BytesIO(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: image/png\r\n"
+                b"Content-Length: 10\r\n"
+                b"\r\n"
+                b"remote png"
+            )
+
+        def close(self):
+            pass
+
+    def fake_getaddrinfo(host, port, type=0):
+        resolve_calls.append((host, port))
+        if host != "example.com":
+            raise AssertionError(f"unexpected DNS lookup for {host}")
+        if len(resolve_calls) > 1:
+            raise AssertionError("hostname was re-resolved after validation")
+        return [
+            (
+                native_actions.socket.AF_INET,
+                native_actions.socket.SOCK_STREAM,
+                6,
+                "",
+                ("93.184.216.34", port),
+            )
+        ]
+
+    def fake_create_connection(address, timeout=None):
+        socket = FakeSocket()
+        sockets.append((address, timeout, socket))
+        return socket
+
+    monkeypatch.setattr(native_actions.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(native_actions.socket, "create_connection", fake_create_connection)
+
+    data, content_type = native_actions._fetch_media_url(
+        "http://example.com/image.png",
+        deadline=native_actions.time.monotonic() + 5,
+    )
+
+    assert data == b"remote png"
+    assert content_type == "image/png"
+    assert resolve_calls == [("example.com", 80)]
+    assert sockets[0][0] == ("93.184.216.34", 80)
+    assert b"Host: example.com" in sockets[0][2].sent
 
 
 def test_add_media_file_url_blocks_private_ip(monkeypatch, tmp_path):
