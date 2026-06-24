@@ -573,6 +573,22 @@ def test_fetch_media_url_does_not_reresolve_hostname_after_pinning(monkeypatch):
     assert resolve_calls == [("example.com", 80)]
     assert sockets[0][0] == ("93.184.216.34", 80)
     assert b"Host: example.com" in sockets[0][2].sent
+    assert (
+        b"User-Agent: ToolforestAnkiBridge/0.1.1 "
+        b"(+https://toolforest.io; mailto:support@toolforest.io)"
+    ) in sockets[0][2].sent
+
+
+def test_media_fetch_user_agent_uses_addon_version(monkeypatch):
+    monkeypatch.setattr(native_actions, "addon_version", lambda: "9.8.7")
+
+    user_agent = native_actions._media_fetch_user_agent()
+
+    assert user_agent == (
+        "ToolforestAnkiBridge/9.8.7 "
+        "(+https://toolforest.io; mailto:support@toolforest.io)"
+    )
+    assert "Mozilla" not in user_agent
 
 
 def test_add_media_file_url_blocks_private_ip(monkeypatch, tmp_path):

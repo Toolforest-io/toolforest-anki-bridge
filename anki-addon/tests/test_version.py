@@ -8,4 +8,4 @@ from toolforest_bridge import version  # noqa: E402
 
 def test_addon_version_reads_manifest():
     version.addon_version.cache_clear()
-    assert version.addon_version() == "0.1.0"
+    assert version.addon_version() == "0.1.1"

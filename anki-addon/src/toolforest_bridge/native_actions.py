@@ -24,6 +24,8 @@ import time
 import urllib.parse
 from typing import Any, Callable, Optional
 
+from .version import addon_version
+
 
 DELETE_MODEL_ACTION = "toolforestDeleteModel"
 ADD_MEDIA_FILE_ACTION = "toolforestAddMediaFile"
@@ -37,6 +39,9 @@ _MAX_MEDIA_REDIRECTS = 3
 _ALLOWED_MEDIA_MIME_PREFIXES = ("image/", "audio/", "video/")
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _NAT64_WELL_KNOWN_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+_MEDIA_FETCH_USER_AGENT_TEMPLATE = (
+    "ToolforestAnkiBridge/{version} (+https://toolforest.io; mailto:support@toolforest.io)"
+)
 FULL_SYNC_REQUIRED_ERROR = (
     "Anki requires a full sync. Open Anki and use the Sync button to choose "
     "Upload to AnkiWeb or Download from AnkiWeb, then retry this tool after "
@@ -422,6 +427,10 @@ def _validate_response_media_type(content_type: str) -> None:
         raise ValueError("URL response must be an image, audio, or video media type")
 
 
+def _media_fetch_user_agent() -> str:
+    return _MEDIA_FETCH_USER_AGENT_TEMPLATE.format(version=addon_version())
+
+
 def _fetch_media_url(url: str, deadline: Optional[float] = None) -> tuple[bytes, str]:
     if deadline is None:
         deadline = time.monotonic() + _DEFAULT_TIMEOUT_S
@@ -551,7 +560,7 @@ def _request_pinned_url(
             path,
             headers={
                 "Accept": "image/*, audio/*, video/*",
-                "User-Agent": "Toolforest-Anki-Bridge",
+                "User-Agent": _media_fetch_user_agent(),
             },
         )
         response = connection.getresponse()
