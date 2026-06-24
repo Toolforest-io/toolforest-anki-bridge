@@ -37,6 +37,7 @@ _MAX_MEDIA_GET_BYTES = 4_000_000
 _MAX_MEDIA_FETCH_BYTES = 50 * 1024 * 1024
 _MAX_MEDIA_REDIRECTS = 3
 _ALLOWED_MEDIA_MIME_PREFIXES = ("image/", "audio/", "video/")
+_ALLOWED_MEDIA_MIME_TYPES = {"application/ogg"}
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _NAT64_WELL_KNOWN_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 _MEDIA_FETCH_USER_AGENT_TEMPLATE = (
@@ -261,7 +262,7 @@ def _sanitize_media_filename(raw_filename: Any) -> str:
 
 def _guess_allowed_media_type(filename: str) -> str:
     mime_type, _encoding = mimetypes.guess_type(filename)
-    if not mime_type or not mime_type.startswith(_ALLOWED_MEDIA_MIME_PREFIXES):
+    if not mime_type or not _is_allowed_media_mime_type(mime_type):
         raise ValueError(
             "media file must have an image, audio, or video filename extension"
         )
@@ -423,8 +424,14 @@ def _delete_media_file(params: dict, collection: Any) -> dict:
 
 def _validate_response_media_type(content_type: str) -> None:
     media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type and not media_type.startswith(_ALLOWED_MEDIA_MIME_PREFIXES):
+    if media_type and not _is_allowed_media_mime_type(media_type):
         raise ValueError("URL response must be an image, audio, or video media type")
+
+
+def _is_allowed_media_mime_type(media_type: str) -> bool:
+    return media_type in _ALLOWED_MEDIA_MIME_TYPES or media_type.startswith(
+        _ALLOWED_MEDIA_MIME_PREFIXES
+    )
 
 
 def _media_fetch_user_agent() -> str:

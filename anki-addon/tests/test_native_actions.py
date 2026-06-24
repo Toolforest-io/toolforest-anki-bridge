@@ -386,6 +386,10 @@ def test_add_media_file_path_imports_local_file(tmp_path):
     assert (Path(media.dir()) / "sound.mp3").read_bytes() == b"mp3 bytes"
 
 
+def test_ogg_container_filename_extension_is_media():
+    assert native_actions._guess_allowed_media_type("clip.ogx") == "application/ogg"
+
+
 def test_add_media_file_rejects_unsafe_filename(tmp_path):
     media = _Media(tmp_path / "media")
 
@@ -515,6 +519,49 @@ def test_add_media_file_url_fetches_public_url_with_pinned_ip(monkeypatch, tmp_p
     assert (Path(media.dir()) / "remote.png").read_bytes() == b"remote png"
 
 
+def test_add_media_file_url_accepts_ogg_application_content_type(
+    monkeypatch, tmp_path
+):
+    media = _Media(tmp_path / "media")
+
+    def fake_fetch(url, deadline=None):
+        assert url == "https://commons.wikimedia.org/wiki/Special:FilePath/clip.ogg"
+        return b"ogg bytes", "application/ogg"
+
+    monkeypatch.setattr(native_actions, "_fetch_media_url", fake_fetch)
+
+    result = native_actions.execute_action(
+        native_actions.ADD_MEDIA_FILE_ACTION,
+        {
+            "filename": "clip.ogg",
+            "url": "https://commons.wikimedia.org/wiki/Special:FilePath/clip.ogg",
+        },
+        _Collection(models=_Models(), media=media),
+    )
+
+    assert result == {"filename": "clip.ogg"}
+    assert (Path(media.dir()) / "clip.ogg").read_bytes() == b"ogg bytes"
+
+
+def test_add_media_file_url_rejects_non_media_application_content_type(
+    monkeypatch, tmp_path
+):
+    media = _Media(tmp_path / "media")
+
+    monkeypatch.setattr(
+        native_actions,
+        "_fetch_media_url",
+        lambda url, deadline=None: (b"not media", "application/json"),
+    )
+
+    with pytest.raises(ValueError, match="media type"):
+        native_actions.execute_action(
+            native_actions.ADD_MEDIA_FILE_ACTION,
+            {"filename": "clip.ogg", "url": "https://example.com/clip.ogg"},
+            _Collection(models=_Models(), media=media),
+        )
+
+
 def test_fetch_media_url_does_not_reresolve_hostname_after_pinning(monkeypatch):
     resolve_calls = []
     sockets = []
@@ -574,7 +621,7 @@ def test_fetch_media_url_does_not_reresolve_hostname_after_pinning(monkeypatch):
     assert sockets[0][0] == ("93.184.216.34", 80)
     assert b"Host: example.com" in sockets[0][2].sent
     assert (
-        b"User-Agent: ToolforestAnkiBridge/0.1.1 "
+        b"User-Agent: ToolforestAnkiBridge/0.1.2 "
         b"(+https://toolforest.io; mailto:support@toolforest.io)"
     ) in sockets[0][2].sent
 
