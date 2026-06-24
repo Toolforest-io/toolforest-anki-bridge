@@ -621,7 +621,7 @@ def test_fetch_media_url_does_not_reresolve_hostname_after_pinning(monkeypatch):
     assert sockets[0][0] == ("93.184.216.34", 80)
     assert b"Host: example.com" in sockets[0][2].sent
     assert (
-        b"User-Agent: ToolforestAnkiBridge/0.1.2 "
+        b"User-Agent: ToolforestAnkiBridge/0.1.3 "
         b"(+https://toolforest.io; mailto:support@toolforest.io)"
     ) in sockets[0][2].sent
 

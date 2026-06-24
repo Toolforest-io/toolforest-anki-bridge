@@ -13,7 +13,7 @@ rm -f "$out"
 
 staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
-cp -R "$src/" "$staging/"
+cp -R "$src"/. "$staging"/
 find "$staging" -name '__pycache__' -type d -prune -exec rm -rf {} +
 find "$staging" -name '*.pyc' -delete
 # meta.json is local state and must never ship
