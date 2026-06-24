@@ -1,5 +1,7 @@
 import importlib.util
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 
@@ -45,3 +47,23 @@ def test_install_variant_preserves_existing_config_and_meta(monkeypatch, tmp_pat
     )
     assert (target / "config.json").read_text() == existing_config
     assert (target / "meta.json").read_text() == existing_meta
+
+
+def test_package_script_builds_flat_ankiaddon():
+    repo_root = Path(__file__).resolve().parents[2]
+    package_path = repo_root / "dist" / "toolforest_bridge.ankiaddon"
+
+    subprocess.run(
+        [str(repo_root / "anki-addon" / "scripts" / "package.sh")],
+        cwd=repo_root,
+        check=True,
+    )
+
+    with zipfile.ZipFile(package_path) as archive:
+        names = archive.namelist()
+
+    assert "manifest.json" in names
+    assert "__init__.py" in names
+    assert not any(name.startswith("toolforest_bridge/") for name in names)
+    assert not any("__pycache__" in name for name in names)
+    assert not any(name.endswith("meta.json") for name in names)
