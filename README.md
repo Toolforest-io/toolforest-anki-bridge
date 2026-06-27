@@ -13,7 +13,7 @@ The add-on holds a single **outbound** WebSocket connection to the Toolforest br
 
 ## Install
 
-1. Install **Toolforest Bridge**: code `TBD` (AnkiWeb listing pending), or download the `.ankiaddon` file from the [latest GitHub release](../../releases/latest) and use Tools → Add-ons → Install from file…
+1. Install **Toolforest Bridge** from [AnkiWeb](https://ankiweb.net/shared/info/1897413075): in Anki, open Tools → Add-ons → Get Add-ons… and enter code `1897413075`. Manual fallback: download the `.ankiaddon` file from the [latest GitHub release](../../releases/latest) and use Tools → Add-ons → Install from file…
 2. Restart Anki, then Tools → Toolforest Bridge… → **Sign in**. You'll get a short code to confirm at toolforest.io/activate.
 
 The status entry in the Tools menu shows Connected / Signed out / reconnecting states, and the status dialog reports that the native Anki executor is active.
